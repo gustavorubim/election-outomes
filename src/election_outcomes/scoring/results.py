@@ -55,6 +55,10 @@ class ResultComparator:
             self._html_report(summary=summary, comparison=comparison),
             output_dir / "result_comparison.html",
         )
+        write_text(
+            self._narrative(summary=summary, comparison=comparison),
+            output_dir / "narrative.md",
+        )
         return {**summary, "output_dir": str(output_dir)}
 
     def _comparison_frame(
@@ -295,4 +299,42 @@ alt="Winner probability versus actual outcome"></figure>
 </table>
 </body>
 </html>
+"""
+
+    @staticmethod
+    def _narrative(summary: dict[str, Any], comparison: pl.DataFrame) -> str:
+        if comparison.is_empty():
+            return (
+                "# Forecast Comparison Narrative\n\n"
+                "No matching forecast and result rows were found.\n"
+            )
+        largest_error = (
+            comparison.sort("absolute_vote_share_error", descending=True)
+            .select(["race_id", "option_id", "absolute_vote_share_error"])
+            .row(0, named=True)
+        )
+        misses = comparison.filter(pl.col("actual_winner") & ~pl.col("predicted_winner"))
+        miss_text = (
+            "No winner misses among matched races."
+            if misses.is_empty()
+            else "Missed winners: "
+            + ", ".join(
+                f"{row['race_id']} ({row['option_id']})" for row in misses.iter_rows(named=True)
+            )
+            + "."
+        )
+        return f"""# Forecast Comparison Narrative
+
+- Compared races: `{summary["race_count"]}`
+- Matched rows: `{summary["row_count"]}`
+- Winner accuracy: `{summary["winner_accuracy"]}`
+- Mean absolute vote-share error: `{summary["mean_absolute_vote_share_error"]}`
+- Brier score: `{summary["brier_score"]}`
+- Upset count: `{summary["upset_count"]}`
+
+{miss_text}
+
+Largest vote-share error: `{largest_error["race_id"]}` / `{largest_error["option_id"]}`.
+
+Absolute error: `{largest_error["absolute_vote_share_error"]}`.
 """

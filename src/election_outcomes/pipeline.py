@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from election_outcomes.config import ProjectContext
-from election_outcomes.features import FeatureBuilder, FeatureBundle
+from election_outcomes.config import ProjectContext, Scenario, ScenarioRegistry
+from election_outcomes.features import (
+    FeatureBuilder,
+    FeatureBundle,
+    filter_bundle_by_date,
+    filter_results_before_cycle,
+    subset_bundle,
+)
 from election_outcomes.ingest import SyncRunner
 from election_outcomes.models import (
     EnsembleModel,
@@ -22,7 +27,14 @@ from election_outcomes.models import (
 )
 from election_outcomes.normalize import CuratedDataBuilder
 from election_outcomes.performance.benchmark import PerformanceBenchmark
-from election_outcomes.reports import DiagnosticsReport, MethodologySnapshot, PlotGenerator
+from election_outcomes.reports import (
+    DiagnosticsReport,
+    MethodologySnapshot,
+    ModelCard,
+    PlotGenerator,
+    SilverStyleBenchmark,
+    benchmark_to_json,
+)
 from election_outcomes.scoring import BacktestRunner, ResultComparator, RewardEvaluator
 from election_outcomes.storage.io import write_json, write_parquet, write_text
 
@@ -38,16 +50,30 @@ class ForecastPipeline:
         CuratedDataBuilder(self.context).run()
         return FeatureBuilder(self.context).run()
 
-    def run_forecast(self, as_of: str, run_id: str | None = None) -> Path:
+    def run_forecast(
+        self, as_of: str | None, run_id: str | None = None, scenario: str | None = None
+    ) -> Path:
         run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
+        as_of = as_of or (scenario_obj.default_as_of if scenario_obj else None)
+        if as_of is None:
+            raise ValueError("as_of is required unless the selected scenario defines default_as_of")
         self.sync()
         full_bundle = self.build_features()
-        bundle = self._active_bundle(full_bundle, as_of)
+        scenario_bundle = self._scenario_bundle(full_bundle, scenario_obj, include_cycle=True)
+        bundle = self._active_bundle(scenario_bundle, as_of)
+        target_cycle = self._target_cycle(bundle, scenario_obj)
+        training_source = self._scenario_bundle(full_bundle, scenario_obj, include_cycle=False)
+        training_bundle = filter_bundle_by_date(
+            filter_results_before_cycle(training_source, target_cycle), as_of
+        )
         model_config = self.context.read_yaml("model.yaml")
+        model_config = self._apply_component_admission(model_config, scenario_obj)
+        residual_covariance = self._load_residual_covariance(scenario_obj)
         source_manifest = pl.read_parquet(self.context.curated_dir / "source_manifest.parquet")
         component_estimates = [
             PollingModel(model_config, as_of=as_of).run(bundle),
-            FundamentalsModel(model_config).fit(full_bundle).run(bundle),
+            FundamentalsModel(model_config).fit(training_bundle).run(bundle),
             MarketModel(model_config).run(bundle),
             PublicSignalModel(
                 trusted=bool(
@@ -56,7 +82,9 @@ class ForecastPipeline:
             ).run(bundle),
         ]
         ensemble = EnsembleModel(model_config).run(bundle, component_estimates)
-        outputs = SimulationEngine(model_config).run(bundle, ensemble)
+        outputs = SimulationEngine(model_config, residual_covariance=residual_covariance).run(
+            bundle, ensemble
+        )
         race_forecasts = self._attach_lineage(outputs.race_forecasts, model_config, source_manifest)
         race_catalog = self._attach_model_hash(bundle.race_catalog, model_config)
         out_dir = self.context.artifacts_dir / "runs" / run_id
@@ -73,7 +101,23 @@ class ForecastPipeline:
             source_manifest.with_columns(pl.lit("forecast_artifacts").alias("downstream_usage")),
             out_dir / "source_manifest.parquet",
         )
-        backtest_payload = BacktestRunner(self.context).evaluate()
+        backtest_artifacts = BacktestRunner(self.context)._evaluate(
+            scenario_obj.family if scenario_obj else None
+        )
+        backtest_payload = backtest_artifacts.payload
+        benchmark_covariance = (
+            residual_covariance
+            if residual_covariance is not None
+            else backtest_artifacts.residual_covariance
+        )
+        silver_benchmark = SilverStyleBenchmark().evaluate(
+            model_config=model_config,
+            race_catalog=race_catalog,
+            race_forecasts=race_forecasts,
+            backtest_payload=backtest_payload,
+            residual_covariance=benchmark_covariance,
+            source_manifest=source_manifest,
+        )
         plot_generator = PlotGenerator()
         plot_manifest = plot_generator.render_all(
             out_dir,
@@ -82,14 +126,29 @@ class ForecastPipeline:
             outputs.draws,
             outputs.control_forecasts,
             outputs.ecosystem_forecasts,
-            full_bundle.backtest_predictions,
+            backtest_artifacts.rolling_predictions
+            if not backtest_artifacts.rolling_predictions.is_empty()
+            else full_bundle.backtest_predictions,
             backtest_payload,
+            silver_benchmark,
         )
         plot_generator.write_manifest(plot_manifest, out_dir)
         methodology = MethodologySnapshot().render(
             run_id, as_of, model_config, source_manifest.height
         )
         write_text(methodology, out_dir / "methodology_snapshot.md")
+        write_text(benchmark_to_json(silver_benchmark), out_dir / "silver_benchmark.json")
+        write_text(SilverStyleBenchmark.html(silver_benchmark), out_dir / "silver_benchmark.html")
+        model_card = ModelCard().render(
+            run_id=run_id,
+            scenario=scenario_obj.metadata() if scenario_obj else None,
+            model_config=model_config,
+            backtest_payload=backtest_payload,
+            component_admission=backtest_artifacts.component_admission,
+            residual_covariance=residual_covariance,
+            source_manifest=source_manifest,
+        )
+        write_text(model_card, out_dir / "model_card.md")
         self._write_reproducibility_fingerprint(out_dir, previous_fingerprint)
         reward_card = RewardEvaluator(model_config).evaluate(
             run_id,
@@ -110,15 +169,26 @@ class ForecastPipeline:
             backtest_payload,
             reward_card,
             plot_manifest,
+            silver_benchmark,
+            control_forecasts=outputs.control_forecasts,
+            ecosystem_forecasts=outputs.ecosystem_forecasts,
         )
         write_text(diagnostics, out_dir / "diagnostics.html")
         return out_dir
 
-    def run_backtest(self, run_id: str | None = None) -> dict[str, Any]:
+    def run_backtest(
+        self,
+        run_id: str | None = None,
+        scenario: str | None = None,
+        start_cycle: int | None = None,
+        holdout_cycle: int | None = None,
+    ) -> dict[str, Any]:
         run_id = run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         self.sync()
         self.build_features()
-        return BacktestRunner(self.context).run(run_id)
+        return BacktestRunner(self.context).run(
+            run_id, scenario=scenario, start_cycle=start_cycle, holdout_cycle=holdout_cycle
+        )
 
     def run_benchmark(
         self,
@@ -174,8 +244,27 @@ class ForecastPipeline:
         forecast_draws = pl.read_parquet(out_dir / "forecast_draws.parquet")
         control_forecasts = pl.read_parquet(out_dir / "control_forecasts.parquet")
         ecosystem_forecasts = pl.read_parquet(out_dir / "ecosystem_forecasts.parquet")
-        backtest_payload = BacktestRunner(self.context).evaluate()
-        backtest_predictions = self._read_optional_curated("backtest_predictions")
+        backtest_artifacts = BacktestRunner(self.context)._evaluate()
+        backtest_payload = backtest_artifacts.payload
+        latest_covariance = self._read_latest_covariance(None)
+        benchmark_covariance = (
+            latest_covariance
+            if latest_covariance is not None
+            else backtest_artifacts.residual_covariance
+        )
+        silver_benchmark = SilverStyleBenchmark().evaluate(
+            model_config=model_config,
+            race_catalog=race_catalog,
+            race_forecasts=race_forecasts,
+            backtest_payload=backtest_payload,
+            residual_covariance=benchmark_covariance,
+            source_manifest=source_manifest,
+        )
+        backtest_predictions = (
+            backtest_artifacts.rolling_predictions
+            if not backtest_artifacts.rolling_predictions.is_empty()
+            else self._read_optional_curated("backtest_predictions")
+        )
         plot_generator = PlotGenerator()
         plot_manifest = plot_generator.render_all(
             out_dir,
@@ -186,6 +275,7 @@ class ForecastPipeline:
             ecosystem_forecasts,
             backtest_predictions,
             backtest_payload,
+            silver_benchmark,
         )
         plot_generator.write_manifest(plot_manifest, out_dir)
         reward_card_path = out_dir / "reward_card.json"
@@ -202,12 +292,29 @@ class ForecastPipeline:
             backtest_payload,
             reward_card,
             plot_manifest,
+            silver_benchmark,
+            control_forecasts=control_forecasts,
+            ecosystem_forecasts=ecosystem_forecasts,
         )
         write_text(diagnostics, out_dir / "diagnostics.html")
         methodology = MethodologySnapshot().render(
             run_id, "existing", model_config, source_manifest.height
         )
         write_text(methodology, out_dir / "methodology_snapshot.md")
+        write_text(benchmark_to_json(silver_benchmark), out_dir / "silver_benchmark.json")
+        write_text(SilverStyleBenchmark.html(silver_benchmark), out_dir / "silver_benchmark.html")
+        write_text(
+            ModelCard().render(
+                run_id=run_id,
+                scenario=None,
+                model_config=model_config,
+                backtest_payload=backtest_payload,
+                component_admission=backtest_artifacts.component_admission,
+                residual_covariance=latest_covariance,
+                source_manifest=source_manifest,
+            ),
+            out_dir / "model_card.md",
+        )
         return out_dir
 
     def _read_optional_curated(self, name: str) -> pl.DataFrame:
@@ -218,40 +325,57 @@ class ForecastPipeline:
     def _active_bundle(bundle: FeatureBundle, as_of: str) -> FeatureBundle:
         cutoff = date.fromisoformat(as_of)
         active_catalog = bundle.race_catalog.filter(pl.col("election_date") >= cutoff)
-        active_ids = active_catalog["race_id"].to_list()
+        return filter_bundle_by_date(subset_bundle(bundle, active_catalog), as_of)
 
-        def by_race(frame: pl.DataFrame) -> pl.DataFrame:
-            return (
-                frame.filter(pl.col("race_id").is_in(active_ids))
-                if "race_id" in frame.columns
-                else frame
-            )
+    @staticmethod
+    def _scenario_bundle(
+        bundle: FeatureBundle, scenario: Scenario | None, include_cycle: bool
+    ) -> FeatureBundle:
+        if scenario is None:
+            return bundle
+        return subset_bundle(bundle, scenario.filter_catalog(bundle.race_catalog, include_cycle))
 
-        def by_race_and_date(frame: pl.DataFrame, column: str) -> pl.DataFrame:
-            filtered = by_race(frame)
-            if column not in filtered.columns:
-                return filtered
-            dates = pl.col(column)
-            if filtered.schema[column] != pl.Date:
-                dates = (
-                    pl.col(column)
-                    .cast(pl.Utf8)
-                    .str.slice(0, 10)
-                    .str.strptime(pl.Date, strict=False)
-                )
-            return filtered.filter(dates <= cutoff)
+    @staticmethod
+    def _target_cycle(bundle: FeatureBundle, scenario: Scenario | None) -> int:
+        if scenario and scenario.cycle is not None:
+            return scenario.cycle
+        cycles = sorted(int(value) for value in bundle.race_catalog["cycle"].unique().to_list())
+        if not cycles:
+            raise ValueError("No active races available for target cycle selection")
+        return cycles[0]
 
-        return replace(
-            bundle,
-            races=by_race(bundle.races),
-            options=by_race(bundle.options),
-            polls=by_race_and_date(bundle.polls, "end_date"),
-            markets=by_race_and_date(bundle.markets, "observed_at"),
-            public_signals=by_race_and_date(bundle.public_signals, "observed_at"),
-            fundamentals=by_race(bundle.fundamentals),
-            results=by_race(bundle.results),
-            race_catalog=active_catalog,
+    def _apply_component_admission(
+        self, model_config: dict[str, Any], scenario: Scenario | None
+    ) -> dict[str, Any]:
+        updated = json.loads(json.dumps(model_config))
+        key = scenario.family if scenario else "default"
+        path = (
+            self.context.artifacts_dir / "backtests" / "latest" / f"component_admission_{key}.json"
         )
+        if not path.exists():
+            return updated
+        with path.open("r", encoding="utf-8") as handle:
+            admission = json.load(handle)
+        if isinstance(admission, dict):
+            if isinstance(admission.get("trusted_components"), dict):
+                updated["trusted_components"] = admission["trusted_components"]
+            if isinstance(admission.get("component_weights"), dict):
+                updated["component_weights"] = admission["component_weights"]
+            updated["component_admission"] = admission
+        return updated
+
+    def _load_residual_covariance(self, scenario: Scenario | None) -> pl.DataFrame | None:
+        return self._read_latest_covariance(scenario.family if scenario else None)
+
+    def _read_latest_covariance(self, key: str | None) -> pl.DataFrame | None:
+        storage_key = key or "default"
+        path = (
+            self.context.artifacts_dir
+            / "backtests"
+            / "latest"
+            / f"residual_covariance_{storage_key}.parquet"
+        )
+        return pl.read_parquet(path) if path.exists() else None
 
     @staticmethod
     def _attach_lineage(
@@ -301,6 +425,9 @@ class ForecastPipeline:
                 "ecosystem_forecasts.parquet",
                 "source_manifest.parquet",
                 "methodology_snapshot.md",
+                "model_card.md",
+                "silver_benchmark.html",
+                "silver_benchmark.json",
                 "plot_manifest.json",
                 "performance.json",
             ]

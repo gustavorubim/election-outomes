@@ -145,6 +145,9 @@ class RewardEvaluator:
             "source_manifest.parquet",
             "diagnostics.html",
             "methodology_snapshot.md",
+            "model_card.md",
+            "silver_benchmark.html",
+            "silver_benchmark.json",
             "plot_manifest.json",
             "performance.json",
             "reproducibility_fingerprint.json",
@@ -262,6 +265,10 @@ class RewardEvaluator:
             key = str(status_value) if status_value else "unknown"
             breakdown[key] = breakdown.get(key, 0) + int(row["count"])
         if "auth_mode" in source_manifest.columns:
+            failed_auth = source_manifest.filter(
+                (pl.col("status") == "failed") & (pl.col("auth_mode") != "public")
+            ).height
+            breakdown["failed_auth"] = int(failed_auth)
             for row in (
                 source_manifest.group_by("auth_mode")
                 .agg(pl.len().alias("count"))

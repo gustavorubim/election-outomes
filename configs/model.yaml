@@ -83,7 +83,7 @@ correlation:
     OR: west
     WA: west
 control_thresholds:
-  president: 1
+  president: 270
   senate: 1
   house: 1
   local: 1

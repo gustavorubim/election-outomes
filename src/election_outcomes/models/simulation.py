@@ -24,8 +24,11 @@ class SimulationOutputs:
 
 
 class SimulationEngine:
-    def __init__(self, config: dict[str, object]) -> None:
+    def __init__(
+        self, config: dict[str, object], residual_covariance: pl.DataFrame | None = None
+    ) -> None:
         self.config = config
+        self.residual_covariance = residual_covariance
         self.seed = int(config.get("seed", 20260508))
         self.draw_count = int(config.get("simulation_count", 1000))
         uncertainty = dict(config.get("uncertainty", {}))
@@ -251,6 +254,8 @@ class SimulationEngine:
         catalog: dict[str, dict[str, object]],
         rng: np.random.Generator,
     ) -> dict[str, np.ndarray]:
+        if self.residual_covariance is not None and not self.residual_covariance.is_empty():
+            return self._covariance_systematic_errors(catalog, rng)
         regions = sorted(
             {self._region_for_race(row) for row in catalog.values() if row.get("tier") != "C"}
         )
@@ -270,10 +275,50 @@ class SimulationEngine:
             if row.get("tier") != "C"
         }
 
+    def _covariance_systematic_errors(
+        self,
+        catalog: dict[str, dict[str, object]],
+        rng: np.random.Generator,
+    ) -> dict[str, np.ndarray]:
+        active = {race_id: row for race_id, row in catalog.items() if row.get("tier") != "C"}
+        groups = sorted({self._covariance_group_for_race(row) for row in active.values()})
+        offices = sorted({str(row.get("office_type")) for row in active.values()})
+        covariance_lookup = {
+            (str(row["row_group"]), str(row["column_group"])): float(row["covariance"])
+            for row in self.residual_covariance.iter_rows(named=True)
+        }
+        fallback_variance = max(self.region_sigma**2, 0.0004)
+        matrix = np.zeros((len(groups), len(groups)), dtype=np.float64)
+        for row_index, row_group in enumerate(groups):
+            for column_index, column_group in enumerate(groups):
+                matrix[row_index, column_index] = covariance_lookup.get(
+                    (row_group, column_group),
+                    fallback_variance if row_index == column_index else 0.0,
+                )
+        matrix = (matrix + matrix.T) / 2.0
+        matrix += np.eye(len(groups)) * 1e-8
+        group_draws = rng.multivariate_normal(
+            mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count
+        ).T
+        group_errors = {group: group_draws[index] for index, group in enumerate(groups)}
+        office_errors = {
+            office: rng.normal(0, self.office_sigma, self.draw_count) for office in offices
+        }
+        return {
+            race_id: group_errors[self._covariance_group_for_race(row)]
+            + office_errors[str(row.get("office_type"))]
+            for race_id, row in active.items()
+        }
+
     def _region_for_race(self, race: dict[str, object]) -> str:
         geography = str(race.get("geography") or "")
         state = geography.split("-")[0]
         return self.geographic_groups.get(state, state or "unknown")
+
+    @staticmethod
+    def _covariance_group_for_race(race: dict[str, object]) -> str:
+        geography = str(race.get("geography") or "")
+        return geography.split("-")[0] or "unknown"
 
     @staticmethod
     def _apply_multi_option_error(shares: list[float], error: float) -> list[float]:

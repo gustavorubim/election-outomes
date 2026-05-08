@@ -62,8 +62,9 @@ def build_features(
 
 @forecast_app.command("run")
 def forecast_run(
-    as_of: str = typer.Option(..., help="Forecast date in YYYY-MM-DD form."),
+    as_of: str | None = typer.Option(None, help="Forecast date in YYYY-MM-DD form."),
     run_id: str | None = typer.Option(None, help="Stable run id."),
+    scenario: str | None = typer.Option(None, help="Scenario key from configs/scenarios.yaml."),
     root: Path | None = typer.Option(None, help="Project root."),
     sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
     data_dir: Path | None = typer.Option(None, help="Data directory override."),
@@ -76,13 +77,16 @@ def forecast_run(
         data_dir=data_dir,
         artifacts_dir=artifacts_dir,
     )
-    out_dir = ForecastPipeline(context).run_forecast(as_of=as_of, run_id=run_id)
+    out_dir = ForecastPipeline(context).run_forecast(as_of=as_of, run_id=run_id, scenario=scenario)
     console.print(f"[green]Forecast complete[/green]: {out_dir}")
 
 
 @backtest_app.command("run")
 def backtest_run(
     run_id: str | None = typer.Option(None, help="Stable backtest run id."),
+    scenario: str | None = typer.Option(None, help="Scenario key from configs/scenarios.yaml."),
+    start_cycle: int | None = typer.Option(None, help="First holdout cycle to score."),
+    holdout_cycle: int | None = typer.Option(None, help="Single holdout cycle to score."),
     root: Path | None = typer.Option(None, help="Project root."),
     sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
     data_dir: Path | None = typer.Option(None, help="Data directory override."),
@@ -95,7 +99,12 @@ def backtest_run(
         data_dir=data_dir,
         artifacts_dir=artifacts_dir,
     )
-    payload = ForecastPipeline(context).run_backtest(run_id=run_id)
+    payload = ForecastPipeline(context).run_backtest(
+        run_id=run_id,
+        scenario=scenario,
+        start_cycle=start_cycle,
+        holdout_cycle=holdout_cycle,
+    )
     console.print(f"[green]Backtest complete[/green]: {payload['row_count']} rows")
 
 
