@@ -1,0 +1,16 @@
+scenarios:
+  president_state:
+    description: Historical U.S. presidential state-level races for rolling-origin backtests.
+    office_type: president
+    geography_type: state
+    control_body: president
+  president_2024_state:
+    description: 2024 U.S. presidential state-level forecast and actuals comparison.
+    family: president_state
+    cycle: 2024
+    office_type: president
+    geography_type: state
+    control_body: president
+    default_as_of: "2024-11-04"
+    electoral_votes:
+      WI: 10

@@ -30,7 +30,8 @@ class SourceRegistry:
 
     @classmethod
     def from_context(cls, context: ProjectContext) -> SourceRegistry:
-        raw_sources = context.read_yaml(context.sources_config).get("sources", [])
+        payload = cls._read_source_payload(context, context.sources_config, seen=set())
+        raw_sources = payload.get("sources", [])
         sources = []
         for item in raw_sources:
             path = Path(item["path"]) if item.get("path") else None
@@ -53,6 +54,32 @@ class SourceRegistry:
                 )
             )
         return cls(sources)
+
+    @classmethod
+    def _read_source_payload(
+        cls, context: ProjectContext, name: str, seen: set[str]
+    ) -> dict[str, Any]:
+        if name in seen:
+            chain = " -> ".join([*seen, name])
+            raise ValueError(f"Cyclic source registry extends chain: {chain}")
+        seen.add(name)
+        payload = context.read_yaml(name)
+        base_sources: list[dict[str, Any]] = []
+        extends = payload.get("extends")
+        if extends:
+            if not isinstance(extends, str):
+                raise ValueError(f"extends in {name} must be a config file name")
+            base_sources = cls._read_source_payload(context, extends, seen).get("sources", [])
+        overlay_sources = payload.get("sources", [])
+        merged: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for item in [*base_sources, *overlay_sources]:
+            source_id = str(item["id"])
+            if source_id not in merged:
+                order.append(source_id)
+            merged[source_id] = dict(item)
+        seen.remove(name)
+        return {"sources": [merged[source_id] for source_id in order]}
 
     def by_table(self) -> dict[str, SourceDefinition]:
         return {source.table: source for source in self.sources}

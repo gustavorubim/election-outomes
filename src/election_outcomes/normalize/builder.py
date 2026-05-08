@@ -126,9 +126,13 @@ class CuratedDataBuilder:
             return {}
         try:
             payload = json.loads(str(raw))
-        except json.JSONDecodeError:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        except json.JSONDecodeError as exc:
+            source_id = row.get("source_id", "unknown")
+            raise ValueError(f"Malformed parser_args JSON for source {source_id}") from exc
+        if not isinstance(payload, dict):
+            source_id = row.get("source_id", "unknown")
+            raise ValueError(f"parser_args for source {source_id} must decode to a mapping")
+        return payload
 
     @classmethod
     def _dedupe(cls, frame: pl.DataFrame, table: str) -> pl.DataFrame:
@@ -180,11 +184,20 @@ class CuratedDataBuilder:
         if missing:
             raise ValueError(f"FiveThirtyEight president polls missing columns: {sorted(missing)}")
         args = parser_args or {}
-        cycle = int(args.get("cycle", 2020))
-        state_lower = str(args.get("state", "wisconsin")).lower()
-        stage_lower = str(args.get("stage", "general")).lower()
-        race_id = str(args.get("race_id", f"US-PRES-{state_lower.upper()[:2]}-{cycle}"))
-        parties = list(args.get("parties") or ["DEM", "REP"])
+        required_args = {"cycle", "state", "stage", "race_id", "parties"}
+        missing_args = required_args.difference(args)
+        if missing_args:
+            raise ValueError(
+                "FiveThirtyEight president parser_args missing required keys: "
+                f"{sorted(missing_args)}"
+            )
+        cycle = int(args["cycle"])
+        state_lower = str(args["state"]).lower()
+        stage_lower = str(args["stage"]).lower()
+        race_id = str(args["race_id"])
+        parties = [str(party).upper() for party in list(args["parties"])]
+        if not parties:
+            raise ValueError("FiveThirtyEight president parser_args parties must be non-empty")
         return (
             frame.with_columns(
                 pl.col("cycle").cast(pl.Int64, strict=False),

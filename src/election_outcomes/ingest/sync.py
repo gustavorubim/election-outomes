@@ -57,7 +57,12 @@ class SyncRunner:
         previous = read_json(state_path) if state_path.exists() else {}
 
         rows: list[dict[str, object]] = []
-        state: dict[str, str] = {}
+        active_source_ids = {source.id for source in self.registry.sources}
+        state: dict[str, str] = {
+            str(source_id): str(content_hash)
+            for source_id, content_hash in previous.items()
+            if source_id in active_source_ids
+        }
         fetched = skipped = failed = 0
         retrieved_at = datetime.now(UTC).isoformat()
 
