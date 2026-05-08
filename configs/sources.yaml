@@ -1,4 +1,56 @@
+parser_arg_anchors:
+  president_panel_cycles: &president_panel_cycles [2000, 2004, 2008, 2012, 2016, 2020, 2024]
+  presidential_as_of_offsets: &presidential_as_of_offsets [90, 60, 31, 30, 7, 1]
+
 sources:
+  - id: president_state_panel_races
+    table: races
+    type: fixture
+    path: fixtures/president_state_panel.csv
+    parser_version: president-state-panel-races-v1
+    license: Compact state-cycle panel generated from public presidential returns; source terms recorded in docs/data_sources.md.
+    url: file://fixtures/president_state_panel.csv
+    parser_args:
+      cycles: *president_panel_cycles
+  - id: president_state_panel_options
+    table: options
+    type: fixture
+    path: fixtures/president_state_panel.csv
+    parser_version: president-state-panel-options-v1
+    license: Compact state-cycle panel generated from public presidential returns; source terms recorded in docs/data_sources.md.
+    url: file://fixtures/president_state_panel.csv
+    parser_args:
+      cycles: *president_panel_cycles
+  - id: president_state_panel_fundamentals
+    table: fundamentals
+    type: fixture
+    path: fixtures/president_state_panel.csv
+    parser_version: president-state-panel-fundamentals-v1
+    license: Compact state-cycle panel generated from public presidential returns; source terms recorded in docs/data_sources.md.
+    url: file://fixtures/president_state_panel.csv
+    parser_args:
+      cycles: *president_panel_cycles
+      as_of_offsets_days: *presidential_as_of_offsets
+  - id: president_state_panel_polls
+    table: polls
+    type: fixture
+    path: fixtures/president_state_panel.csv
+    parser_version: president-state-panel-polls-v1
+    license: Compact state-cycle panel generated from public presidential returns; source terms recorded in docs/data_sources.md.
+    url: file://fixtures/president_state_panel.csv
+    parser_args:
+      cycles: *president_panel_cycles
+      as_of_offsets_days: *presidential_as_of_offsets
+      sample_size: 900
+  - id: president_state_panel_results
+    table: results
+    type: fixture
+    path: fixtures/president_state_panel.csv
+    parser_version: president-state-panel-results-v1
+    license: Compact state-cycle panel generated from public presidential returns; source terms recorded in docs/data_sources.md.
+    url: file://fixtures/president_state_panel.csv
+    parser_args:
+      cycles: *president_panel_cycles
   - id: fixture_races
     table: races
     type: fixture
@@ -55,4 +107,3 @@ sources:
     parser_version: fixture-v1
     license: Synthetic public-data-style fixture for local validation.
     url: file://fixtures/backtest_predictions.csv
-
