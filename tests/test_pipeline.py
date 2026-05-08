@@ -8,6 +8,7 @@ import polars as pl
 from election_outcomes.config import ProjectContext
 from election_outcomes.features import FeatureBuilder
 from election_outcomes.ingest import SyncRunner
+from election_outcomes.ingest.sources import SourceDefinition, SourceRegistry
 from election_outcomes.models import (
     EnsembleModel,
     FundamentalsModel,
@@ -17,6 +18,7 @@ from election_outcomes.models import (
     SimulationEngine,
 )
 from election_outcomes.normalize import CuratedDataBuilder
+from election_outcomes.normalize.builder import CuratedDataBuilder as _CuratedDataBuilderClass
 from election_outcomes.performance import simulate_binary_draw_arrays
 from election_outcomes.pipeline import ForecastPipeline
 from election_outcomes.scoring import BacktestRunner, score_predictions
@@ -69,8 +71,8 @@ def test_component_models_and_ensemble_respect_admission(tmp_path: Path) -> None
     model_config = ctx.read_yaml("model.yaml")
 
     estimates = [
-        PollingModel().run(active),
-        FundamentalsModel().run(active),
+        PollingModel(model_config, as_of="2026-05-08").run(active),
+        FundamentalsModel(model_config).fit(bundle).run(active),
         MarketModel(model_config).run(active),
         PublicSignalModel(trusted=False).run(active),
     ]
@@ -87,8 +89,8 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
     active = ForecastPipeline._active_bundle(bundle, "2026-05-08")
     model_config = ctx.read_yaml("model.yaml")
     estimates = [
-        PollingModel().run(active),
-        FundamentalsModel().run(active),
+        PollingModel(model_config, as_of="2026-05-08").run(active),
+        FundamentalsModel(model_config).fit(bundle).run(active),
         MarketModel(model_config).run(active),
     ]
     ensemble = EnsembleModel(model_config).run(active, estimates)
@@ -96,9 +98,16 @@ def test_simulation_outputs_forecasts_control_and_ecosystem(tmp_path: Path) -> N
 
     assert outputs.draws.height == 6000
     assert outputs.control_forecasts.height > 0
+    assert {"control_threshold", "pivotal_rates"}.issubset(outputs.control_forecasts.columns)
     assert outputs.ecosystem_forecasts.height == 3
+    assert outputs.ecosystem_forecasts["demographic_model_status"].unique().to_list() == [
+        "placeholder_not_estimated"
+    ]
     tier_c = outputs.race_forecasts.filter(pl.col("race_id") == "MAYOR-SPRINGFIELD-2026")
     assert tier_c["winner_probability"].null_count() == tier_c.height
+    assert {"top_drivers", "component_contributions", "uncertainty_explanation"}.issubset(
+        outputs.race_forecasts.columns
+    )
 
 
 def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> None:
@@ -116,6 +125,7 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
         "methodology_snapshot.md",
         "plot_manifest.json",
         "performance.json",
+        "reproducibility_fingerprint.json",
         "plots",
     }
 
@@ -132,7 +142,13 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     reward_card = json.loads((out_dir / "reward_card.json").read_text(encoding="utf-8"))
     rewards = reward_card["rewards"]
     assert rewards["R0_build"]["passed"] is None
-    assert all(value["passed"] is True for key, value in rewards.items() if key != "R0_build")
+    assert rewards["R1_reproducibility"]["passed"] is False
+    assert rewards["R2_provenance"]["passed"] is True
+    assert rewards["R3_sync_integrity"]["passed"] is True
+    assert rewards["R5_baseline_competition"]["passed"] is False
+    assert rewards["R6_component_admission"]["passed"] is False
+    assert rewards["R8_uncertainty_quality"]["passed"] is False
+    assert rewards["R12_performance_contract"]["passed"] is True
     performance = json.loads((out_dir / "performance.json").read_text(encoding="utf-8"))
     assert performance["engine"] in {"numba", "python"}
     assert performance["simulation_count"] == 1000
@@ -173,6 +189,62 @@ def test_presidential_result_comparison(tmp_path: Path) -> None:
     assert (comparison_dir / "result_comparison.html").exists()
     assert (comparison_dir / "plots" / "vote_share_forecast_vs_actual.png").stat().st_size > 0
     assert comparison.filter(pl.col("actual_winner")).height == 1
+
+
+def test_http_sync_and_538_polls_normalizer(tmp_path: Path) -> None:
+    csv_payload = (
+        "cycle,state,pollster,poll_id,question_id,start_date,end_date,sample_size,population,"
+        "methodology,internal,partisan,stage,answer,candidate_party,pct\n"
+        "2020,Wisconsin,Acme Poll,1001,77,10/01/20,10/03/20,800,LV,Live Phone,,,General,"
+        "Smith,DEM,49.5\n"
+        "2020,Wisconsin,Acme Poll,1001,77,10/01/20,10/03/20,800,LV,Live Phone,,,General,"
+        "Jones,REP,48.1\n"
+        "2020,Ohio,Other Poll,1002,88,10/04/20,10/05/20,700,RV,Online Panel,,,General,"
+        "Lee,DEM,40.0\n"
+    )
+    source_path = tmp_path / "538_president.csv"
+    source_path.write_text(csv_payload, encoding="utf-8")
+
+    ctx = ProjectContext.create(
+        root=ROOT,
+        data_dir=tmp_path / "data",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    SyncRunner(ctx).run()
+    fixture_registry = SourceRegistry.from_context(ctx)
+
+    extra = SourceDefinition(
+        id="fivethirtyeight_president_polls_test",
+        table="polls",
+        type="http_csv",
+        path=source_path,
+        parser_version="fivethirtyeight-president-polls-v1",
+        license="Test fixture for 538-format normalization.",
+        url=source_path.resolve().as_uri(),
+        auth_mode="public",
+    )
+    registry = SourceRegistry([*fixture_registry.sources, extra])
+    SyncRunner(ctx, registry=registry).run()
+    result = CuratedDataBuilder(ctx).run()
+
+    polls = result.tables["polls"]
+    assert polls.filter(pl.col("poll_id").str.starts_with("538-")).height == 2
+    wi_rows = polls.filter(pl.col("race_id") == "US-PRES-WI-2020")
+    assert {"D", "R"}.issubset(set(wi_rows["option_id"].str.slice(-1).to_list()))
+    assert wi_rows["methodology"].unique().to_list() == ["live_phone"]
+    assert _CuratedDataBuilderClass is CuratedDataBuilder
+
+
+def test_fundamentals_ridge_fits_when_training_rows_meet_threshold(tmp_path: Path) -> None:
+    _ctx, _sync, bundle = build_bundle(tmp_path)
+    model_config = {"fundamentals": {"min_training_rows": 1, "ridge_alpha": 0.5}}
+    model = FundamentalsModel(model_config).fit(bundle)
+    estimates = model.run(bundle)
+
+    assert model.fit_status.startswith("ridge_fit")
+    assert model.training_rows >= 1
+    assert not estimates.is_empty()
+    assert estimates["explanation"].str.contains("ridge_fit").all()
 
 
 def test_score_predictions_handles_empty_and_real_rows(tmp_path: Path) -> None:

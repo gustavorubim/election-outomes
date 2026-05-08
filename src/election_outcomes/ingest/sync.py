@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,8 +71,12 @@ class SyncRunner:
         previous: dict[str, str],
         retrieved_at: str,
     ) -> tuple[dict[str, object], bool]:
+        if source.type == "http_csv":
+            return self._sync_http(source, previous, retrieved_at)
         if source.type != "fixture":
             raise ValueError(f"Unsupported source type: {source.type}")
+        if source.path is None:
+            raise ValueError(f"Fixture source {source.id} requires a local path")
         content_hash = _sha256(source.path)
         raw_path = self.context.raw_dir / source.id / f"{content_hash}{source.path.suffix}"
         did_fetch = previous.get(source.id) != content_hash or not raw_path.exists()
@@ -87,12 +93,58 @@ class SyncRunner:
                 "content_hash": content_hash,
                 "license": source.license,
                 "parser_version": source.parser_version,
+                "auth_mode": source.auth_mode,
                 "status": "fetched" if did_fetch else "unchanged",
                 "error": "",
                 "downstream_usage": "",
             },
             did_fetch,
         )
+
+    def _sync_http(
+        self,
+        source: SourceDefinition,
+        previous: dict[str, str],
+        retrieved_at: str,
+    ) -> tuple[dict[str, object], bool]:
+        request = urllib.request.Request(
+            source.url,
+            headers={"User-Agent": "election-outcomes/0.1 (+research forecast sync)"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = response.read()
+        content_hash = hashlib.sha256(payload).hexdigest()
+        suffix = self._http_suffix(source)
+        raw_path = self.context.raw_dir / source.id / f"{content_hash}{suffix}"
+        did_fetch = previous.get(source.id) != content_hash or not raw_path.exists()
+        if did_fetch:
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_bytes(payload)
+        return (
+            {
+                "source_id": source.id,
+                "table": source.table,
+                "url": source.url,
+                "raw_path": str(raw_path),
+                "retrieved_at": retrieved_at,
+                "content_hash": content_hash,
+                "license": source.license,
+                "parser_version": source.parser_version,
+                "auth_mode": source.auth_mode,
+                "status": "fetched" if did_fetch else "unchanged",
+                "error": "",
+                "downstream_usage": "",
+            },
+            did_fetch,
+        )
+
+    @staticmethod
+    def _http_suffix(source: SourceDefinition) -> str:
+        if source.path and source.path.suffix:
+            return source.path.suffix
+        parsed = urllib.parse.urlparse(source.url)
+        suffix = Path(parsed.path).suffix
+        return suffix or ".dat"
 
     @staticmethod
     def _failure_row(
@@ -109,6 +161,7 @@ class SyncRunner:
             "content_hash": "",
             "license": source.license,
             "parser_version": source.parser_version,
+            "auth_mode": source.auth_mode,
             "status": "failed",
             "error": str(exc),
             "downstream_usage": "",

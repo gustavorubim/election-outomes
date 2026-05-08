@@ -13,6 +13,7 @@ class ProjectContext:
 
     root: Path
     config_dir: Path
+    sources_config: str
     data_dir: Path
     artifacts_dir: Path
 
@@ -21,6 +22,7 @@ class ProjectContext:
         cls,
         root: str | Path | None = None,
         config_dir: str | Path | None = None,
+        sources_config: str = "sources.yaml",
         data_dir: str | Path | None = None,
         artifacts_dir: str | Path | None = None,
     ) -> ProjectContext:
@@ -29,6 +31,7 @@ class ProjectContext:
         return cls(
             root=project_root,
             config_dir=resolved_config,
+            sources_config=sources_config,
             data_dir=Path(data_dir or project_root / "data").resolve(),
             artifacts_dir=Path(artifacts_dir or project_root / "artifacts").resolve(),
         )

@@ -11,10 +11,11 @@ class SourceDefinition:
     id: str
     table: str
     type: str
-    path: Path
+    path: Path | None
     parser_version: str
     license: str
     url: str
+    auth_mode: str = "none"
 
 
 class SourceRegistry:
@@ -23,11 +24,11 @@ class SourceRegistry:
 
     @classmethod
     def from_context(cls, context: ProjectContext) -> SourceRegistry:
-        raw_sources = context.read_yaml("sources.yaml").get("sources", [])
+        raw_sources = context.read_yaml(context.sources_config).get("sources", [])
         sources = []
         for item in raw_sources:
-            path = Path(item["path"])
-            if not path.is_absolute():
+            path = Path(item["path"]) if item.get("path") else None
+            if path is not None and not path.is_absolute():
                 path = context.root / path
             sources.append(
                 SourceDefinition(
@@ -38,6 +39,7 @@ class SourceRegistry:
                     parser_version=str(item["parser_version"]),
                     license=str(item["license"]),
                     url=str(item["url"]),
+                    auth_mode=str(item.get("auth_mode", "none")),
                 )
             )
         return cls(sources)
