@@ -7,8 +7,9 @@ from time to time. Each run refreshes public data incrementally, snapshots sourc
 provenance, builds a race catalog, runs a hybrid statistical ensemble, backtests trusted
 components, and emits auditable artifacts with measurable rewards.
 
-The implementation is currently fixture-backed so the full modeling, artifact, reward,
-plotting, and validation contract is deterministic before live source adapters are added.
+The default implementation is fixture-backed so the full modeling, artifact, reward,
+plotting, and validation contract is deterministic. A first opt-in live registry
+(`configs/sources_live.yaml`) adds keyless HTTP CSV polling ingestion for one real race.
 
 ## Required Run Outcomes
 
@@ -16,7 +17,8 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
 
 - `race_catalog.parquet`: discovered races with Tier A/B/C status and tier reasons.
 - `race_forecasts.parquet`: winner probabilities, vote-share means/medians, interval
-  columns, model tier, data-quality flags, source lineage, and model-config lineage.
+  columns, model tier, data-quality flags, driver attribution, uncertainty explanation,
+  source lineage, and model-config lineage.
 - `forecast_draws.parquet`: simulation draws by race, option, turnout, vote share,
   winner flag, and correlated-error draw id.
 - `control_forecasts.parquet`: seat/control probabilities, seat distributions, and
@@ -28,10 +30,14 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
 - `diagnostics.html`: scorecards, reward status, source coverage, and embedded plots.
 - `reward_card.json`: machine-readable reward checks.
 - `methodology_snapshot.md`: model version, config, source coverage, and limitations.
+- `reproducibility_fingerprint.json`: stable artifact hashes excluding volatile
+  retrieval/status fields, with same-run-id comparison status when available.
 - `plot_manifest.json`: calibration and projection plot index.
 - `plots/`: static PNG diagnostics.
 - `performance.json`: requested acceleration engine, actual engine, parallel mode,
   Numba availability, thread count, and simulation count.
+- `comparisons/<comparison_id>/`: optional forecast-vs-actual comparison artifacts
+  created by `results compare`.
 
 Forecasts must distinguish:
 
@@ -48,23 +54,26 @@ Use vector rewards so the system cannot hide weak behavior behind one aggregate 
 
 - `R0_build`: `uv sync`, `ruff check`, `ruff format --check`, and
   `pytest --cov=src/election_outcomes --cov-fail-under=90` pass.
-- `R1_reproducibility`: fixed inputs and run config produce the same artifacts, excluding
-  wall-clock metadata.
+- `R1_reproducibility`: fixed inputs and run config produce the same stable artifact
+  fingerprint when the same `run_id` is rerun, excluding wall-clock retrieval metadata
+  and incremental-sync status fields.
 - `R2_provenance`: forecast rows trace to source hashes and model-config hashes.
 - `R3_sync_integrity`: incremental sync fetches new/changed sources only, dedupes records,
   and records failures explicitly.
 - `R4_calibration`: backtests report Brier score, log score, calibration line, expected
   calibration error, and interval coverage.
-- `R5_baseline_competition`: trusted ensemble beats or matches declared baselines on
-  holdout fixtures/cycles; otherwise it is labeled experimental.
+- `R5_baseline_competition`: trusted ensemble beats or matches declared baselines on a
+  rolling-origin holdout with enough historical rows; otherwise it is labeled
+  experimental.
 - `R6_component_admission`: polls, fundamentals, markets, and public signals enter trusted
   output only when ablation evidence supports them.
 - `R7_sparse_honesty`: Tier C races are tracked but do not receive trusted probabilities.
 - `R8_uncertainty_quality`: reported forecast intervals have empirical coverage within
-  configured tolerance.
+  configured tolerance on rolling-origin historical samples large enough to trust.
 - `R9_public_signal_discipline`: news/pageview/social-like signals remain experimental
   until leakage and ablation checks pass.
-- `R10_explainability`: forecast rows include tier reason and data-quality flags.
+- `R10_explainability`: forecast rows include tier reason, data-quality flags, top
+  drivers, component contributions, and uncertainty explanation.
 - `R11_plot_contract`: calibration and projection plots are generated and referenced by
   `plot_manifest.json`.
 - `R12_performance_contract`: forecast runs record the configured acceleration path and
@@ -118,12 +127,17 @@ election-outomes/
 
 Important config contracts:
 
-- `configs/sources.yaml`: source registry and parser metadata.
+- `configs/sources.yaml`: default fixture source registry and parser metadata.
+- `configs/sources_live.yaml`: opt-in live source registry for HTTP CSV/API adapters.
 - `configs/model.yaml`: model version, seed, simulation count, component weights,
   trusted-component flags, uncertainty settings, performance settings, and reward
   thresholds.
 - `configs/tiers.yaml`: Tier A/B/C thresholds and sparse-race policy.
 - `configs/backtests.yaml`: rolling-origin settings, metrics, and baselines.
+
+Current implementation note: the repo ships a fixture scorecard to exercise metric and
+plot contracts. It must not certify `R5`, `R6`, or `R8` until a rolling-origin runner and
+larger historical race store are implemented.
 
 ## Modeling Specification
 
@@ -139,15 +153,18 @@ Canonical latent targets:
 
 Component models:
 
-- Polling model: sample-size/methodology/population weighted polling estimates with
-  pollster and method hooks reserved for hierarchical Bayesian replacement.
+- Polling model: sample-size inverse-variance style polling estimates with methodology,
+  population, sponsor, time-decay, house-effect hooks, and posterior uncertainty proxy.
 - Fundamentals model: historical vote share, partisan lean, incumbency, finance, economy,
   demographics, turnout history, and election type.
-- Market model: public read-only market probabilities adjusted for liquidity and spread.
+- Market model: public read-only market probabilities adjusted for liquidity and spread,
+  then mapped to vote-share proxy through a configurable normal inverse-CDF scale.
 - Public-signal model: news/pageview/official-release features, experimental by default.
-- Ensemble: time-aware weighted blend of trusted components, normalized by race.
-- Simulation: correlated election-error draws with heavy-tailed local error, race-level
-  winners, vote shares, turnout, recount risk, certification risk, and control outcomes.
+- Ensemble: weighted blend of trusted components with vote-share normalization by race
+  and unnormalized marginal win-probability reporting.
+- Simulation: structured-factor election-error draws with national, region, and office
+  factors plus heavy-tailed local error, race-level winners, vote shares, turnout,
+  recount risk, certification-risk proxy, and thresholded control outcomes.
 - Performance: two-option race draw generation uses a Numba parallel kernel with a Python
   fallback, while table transforms should stay vectorized through Polars/DuckDB.
 
@@ -156,8 +173,10 @@ Planned statistical upgrade path:
 - Replace deterministic polling component with a hierarchical Bayesian model using
   `cmdstanpy` or NumPyro behind the same component/artifact schema.
 - Calibrate component weights with rolling-origin backtests rather than static config.
-- Add geography-level correlated-error covariance from historical residuals.
-- Add live source adapters while preserving raw-source hash and curated-table contracts.
+- Replace the current national/region/office factor error model with a
+  geography-by-geography covariance matrix estimated from historical residuals.
+- Extend live source adapters while preserving raw-source hash and curated-table
+  contracts.
 - Extend Numba kernels to multi-option/ranked-choice simulation and score aggregation when
   those paths become measurable bottlenecks.
 
@@ -196,6 +215,31 @@ Benchmark output:
 ```text
 artifacts/benchmarks/<run_id>/performance_benchmark.json
 ```
+
+## Historical Result Comparison
+
+An existing forecast run can be compared against curated actual results:
+
+```bash
+uv run election-outcomes results compare \
+  --forecast-run-id 2024-presidential \
+  --comparison-id 2024-presidential-actuals \
+  --cycle 2024 \
+  --office-type president
+```
+
+Comparison output:
+
+```text
+artifacts/runs/<forecast_run_id>/comparisons/<comparison_id>/
+  result_comparison.parquet
+  result_comparison_summary.json
+  result_comparison.html
+  plots/
+```
+
+The comparison reports winner accuracy, mean absolute vote-share error, Brier score, and
+upset count over the filtered races/options.
 
 ## API Credentials
 

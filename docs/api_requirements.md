@@ -5,6 +5,13 @@ fixtures. Live adapters should read optional credentials from `.env` or shell
 environment variables and record whether each source ran authenticated or public-only
 in `source_manifest.parquet`.
 
+Important current boundary: `.env` may contain real keys, but the first implemented
+live path does not need them. The default `configs/sources.yaml` registry is
+fixture-only. `configs/sources_live.yaml` adds a keyless HTTP CSV adapter for the
+FiveThirtyEight/Datasette 2020 presidential poll stream, normalized into the `polls`
+table for `US-PRES-WI-2020`. All other forecast support tables in that run are still
+fixtures.
+
 ## Not Needed For Current Runs
 
 - Plot generation: no keys. Plots are generated from local Parquet/JSON artifacts.
@@ -20,6 +27,7 @@ in `source_manifest.parquet`.
 
 ## Usually Public Or Keyless For Read-Only Use
 
+- FiveThirtyEight/Datasette poll CSV streams: current first live adapter, keyless.
 - Polymarket market data: public market/event endpoints are generally keyless; trading,
   portfolio, and authenticated WebSocket flows require credentials and are out of scope.
 - Kalshi market data: public market data can be read without trading credentials; trading
@@ -31,3 +39,46 @@ in `source_manifest.parquet`.
 Before implementing each live adapter, re-check that source's current terms, rate limits,
 and authentication requirements. The sync layer must record source URL, retrieval time,
 content hash, parser version, and any auth mode in the manifest.
+
+## Adapter Acceptance Contract
+
+Each live adapter should add all of the following before it can influence forecasts:
+
+- A `configs/sources.yaml` entry with source id, table name, parser version, license or
+  terms note, URL/API endpoint, and auth mode.
+- A raw snapshot with a content hash that can be rerun without silent overwrites.
+- A parser that emits the same curated table contract used by the fixture table it
+  replaces or extends.
+- Tests using golden fixtures that do not require live credentials.
+- A source-manifest row for success, unchanged, skipped, and failed states.
+- README instructions showing how to run the adapter and which `.env` keys are optional
+  or required.
+
+The first production backtest upgrade should not depend on live APIs at runtime. It
+should materialize historical snapshots first, then run rolling-origin splits over those
+snapshots so `R5`, `R6`, and `R8` are repeatable.
+
+## Current Live Smoke Run
+
+```bash
+uv run election-outcomes forecast run \
+  --sources-config sources_live.yaml \
+  --data-dir data/live \
+  --artifacts-dir artifacts/live \
+  --as-of 2020-10-30 \
+  --run-id wi-2020-live-polls
+
+uv run election-outcomes results compare \
+  --sources-config sources_live.yaml \
+  --data-dir data/live \
+  --artifacts-dir artifacts/live \
+  --forecast-run-id wi-2020-live-polls \
+  --comparison-id wi-2020-live-polls-actuals \
+  --cycle 2020 \
+  --office-type president \
+  --race-id US-PRES-WI-2020
+```
+
+This run proves API/file consumption, raw hashing, source-manifest provenance, parser
+normalization, forecast artifact generation, and forecast-vs-actual comparison for one
+real race. It is not yet a full live-source election model.

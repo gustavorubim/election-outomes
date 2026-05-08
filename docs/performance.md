@@ -43,7 +43,9 @@ artifacts/runs/<run_id>/performance.json
 
 That file records the requested engine, actual engine, parallel mode, Numba availability,
 thread count, and simulation count. `reward_card.json` includes
-`R12_performance_contract`.
+`R12_performance_contract`. If Numba is requested but unavailable on the platform, the
+reward accepts a recorded Python fallback rather than failing spuriously; if Numba is
+available, the actual engine must be `numba`.
 
 ## Engineering Rules
 
@@ -53,4 +55,3 @@ thread count, and simulation count. `reward_card.json` includes
 - Benchmark before and after major modeling changes that touch simulation, scoring, or
   large feature generation.
 - Do not trade off forecast correctness, provenance, or sparse-race honesty for speed.
-

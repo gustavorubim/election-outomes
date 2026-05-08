@@ -46,6 +46,7 @@ artifacts/runs/full-forecast/
   diagnostics.html
   reward_card.json
   methodology_snapshot.md
+  reproducibility_fingerprint.json
   performance.json
   plot_manifest.json
   plots/
@@ -70,6 +71,17 @@ for name, payload in rewards.items():
     print(f"{name}: {payload['passed']} | {payload['detail']}")
 PY
 ```
+
+Current fixture-backed reward interpretation:
+
+- `R1_reproducibility` writes a stable artifact fingerprint on every run, but only passes
+  after rerunning the same `run_id` with unchanged inputs and matching the previous
+  fingerprint.
+- `R5_baseline_competition`, `R6_component_admission`, and `R8_uncertainty_quality` are
+  intentionally not certified from the tiny fixture scorecard. They require a real
+  rolling-origin backtest with enough historical races.
+- `R2_provenance` is row-level: every forecast row must carry a model-config hash and
+  source-manifest hash, and the manifest must contain non-empty source hashes.
 
 Inspect the forecast tables:
 
@@ -128,6 +140,163 @@ uv run election-outcomes forecast run --as-of 2026-05-08 --run-id full-diagnosti
 uv run election-outcomes backtest run --run-id full-diagnostic-backtest
 open artifacts/runs/full-diagnostic/diagnostics.html
 ```
+
+The current `backtest run` command is a fixture scorecard, not a production
+rolling-origin fit/evaluate loop. It is useful for exercising metrics, plots, and
+artifact contracts; it does not certify model trust rewards until the historical race
+store is expanded.
+
+## 2024 Presidential Historical Comparison
+
+Use this workflow when you want to run a pre-election 2024 presidential forecast and
+compare the forecast against known actual outcomes. In the current fixture-backed repo,
+the available 2024 presidential example is the Wisconsin presidential race
+`US-PRES-WI-2024`; live adapters will later expand this to all presidential states and
+Electoral College aggregation.
+
+Run the forecast as if it were October 1, 2024:
+
+```bash
+uv sync
+chflags -R nohidden .venv
+uv run election-outcomes forecast run --as-of 2024-10-01 --run-id 2024-presidential
+```
+
+Compare the forecast run with actual 2024 presidential results:
+
+```bash
+uv run election-outcomes results compare \
+  --forecast-run-id 2024-presidential \
+  --comparison-id 2024-presidential-actuals \
+  --cycle 2024 \
+  --office-type president
+```
+
+Comparison output:
+
+```text
+artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/
+  result_comparison.parquet
+  result_comparison_summary.json
+  result_comparison.html
+  plots/
+    vote_share_forecast_vs_actual.png
+    winner_probability_vs_actual.png
+```
+
+Open the comparison report:
+
+```bash
+open artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/result_comparison.html
+```
+
+Inspect the summary metrics:
+
+```bash
+uv run python - <<'PY'
+import json
+from pathlib import Path
+
+summary = json.loads(
+    Path(
+        "artifacts/runs/2024-presidential/"
+        "comparisons/2024-presidential-actuals/"
+        "result_comparison_summary.json"
+    ).read_text()
+)
+print(json.dumps(summary, indent=2, sort_keys=True))
+PY
+```
+
+Inspect the row-level comparison:
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+import polars as pl
+
+comparison = pl.read_parquet(
+    Path(
+        "artifacts/runs/2024-presidential/"
+        "comparisons/2024-presidential-actuals/"
+        "result_comparison.parquet"
+    )
+)
+print(
+    comparison.select(
+        [
+            "race_id",
+            "option_id",
+            "winner_probability",
+            "vote_share_mean",
+            "actual_vote_share",
+            "absolute_vote_share_error",
+            "predicted_winner",
+            "actual_winner",
+        ]
+    )
+)
+PY
+```
+
+The key interpretation fields are:
+
+- `winner_accuracy`: whether the forecast's top option matched the actual winner.
+- `mean_absolute_vote_share_error`: average absolute forecast-share error.
+- `brier_score`: probability score against actual winner indicators.
+- `upset_count`: number of actual winners assigned less than 50% probability.
+
+## First Live Poll Run
+
+The first live-ingestion path uses FiveThirtyEight's public Datasette CSV stream for
+the 2020 presidential poll archive. It does not need Google Civic. The live registry is
+kept separate from the deterministic fixture registry so normal tests do not hit the
+network.
+
+Run a Wisconsin 2020 presidential forecast with live-downloaded 538 polls:
+
+```bash
+uv sync
+chflags -R nohidden .venv
+uv run election-outcomes forecast run \
+  --sources-config sources_live.yaml \
+  --data-dir data/live \
+  --artifacts-dir artifacts/live \
+  --as-of 2020-10-30 \
+  --run-id wi-2020-live-polls
+```
+
+Rerun the same command once if you want `R1_reproducibility` to compare against the
+previous stable fingerprint and pass.
+
+Compare the forecast with actual Wisconsin 2020 results:
+
+```bash
+uv run election-outcomes results compare \
+  --sources-config sources_live.yaml \
+  --data-dir data/live \
+  --artifacts-dir artifacts/live \
+  --forecast-run-id wi-2020-live-polls \
+  --comparison-id wi-2020-live-polls-actuals \
+  --cycle 2020 \
+  --office-type president \
+  --race-id US-PRES-WI-2020
+```
+
+Outputs:
+
+```text
+artifacts/live/runs/wi-2020-live-polls/
+artifacts/live/runs/wi-2020-live-polls/comparisons/wi-2020-live-polls-actuals/
+```
+
+Current live-source boundary:
+
+- Live data: 538 public presidential poll CSV stream, normalized to `polls`.
+- Fixture support data: race catalog, options, fundamentals, and actual result rows.
+- Not live yet: Civic race catalog, FEC finance, Census/FRED/BEA/BLS fundamentals,
+  public market adapters, GDELT, Wikimedia, and rolling-origin historical backtest
+  snapshots.
 
 ## Plots And Diagnostics
 
@@ -216,13 +385,14 @@ The coverage gate is part of the project contract. Do not lower it.
 
 ## Core Commands
 
-- `sync`: snapshot configured public-source fixtures into the local raw lake.
+- `sync`: snapshot configured fixture or HTTP CSV sources into the local raw lake.
 - `build-features`: normalize raw snapshots into curated Parquet tables and race tiers.
 - `forecast run`: refresh data, rebuild features, run models, simulate outcomes, emit
   artifacts, plots, rewards, diagnostics, and performance metadata.
 - `backtest run`: score historical forecast fixtures and component ablations.
 - `report build`: rebuild diagnostics and methodology files for an existing run.
 - `benchmark run`: measure simulation throughput using the configured performance engine.
+- `results compare`: compare an existing forecast run against known actual results.
 
 ## Repository Map
 
@@ -273,11 +443,13 @@ flowchart LR
     artifacts[/"forecast artifacts"/]
     diagnostics["HTML diagnostics"]
     rewards(("reward card"))
+    compare["optional result comparison"]
 
     start --> sync --> raw --> normalize --> curated --> tier
     tier --> models --> ensemble --> sim --> artifacts
     artifacts --> diagnostics
     artifacts --> rewards
+    artifacts --> compare
 ```
 
 ## Control Flow
@@ -291,6 +463,7 @@ sequenceDiagram
     participant Features
     participant Models
     participant Reports
+    participant Results
 
     User->>CLI: election-outcomes forecast run
     CLI->>Pipeline: run_forecast(as_of, run_id)
@@ -304,6 +477,9 @@ sequenceDiagram
     Models-->>Pipeline: draws, forecasts, control, ecosystem
     Pipeline->>Reports: plots, diagnostics, methodology
     Reports-->>User: artifacts/runs/<run_id>/
+    User->>CLI: election-outcomes results compare
+    CLI->>Results: join forecast artifacts to actual results
+    Results-->>User: comparisons/<comparison_id>/
 ```
 
 ## Forecast State Machine
@@ -339,7 +515,9 @@ erDiagram
     FORECAST_DRAWS ||--o{ ECOSYSTEM_FORECASTS : "derived"
     REWARD_CARD ||--|| SOURCE_MANIFEST : "checks"
     REWARD_CARD ||--|| PLOT_MANIFEST : "checks"
+    REWARD_CARD ||--|| REPRO_FINGERPRINT : "checks"
     PLOT_MANIFEST ||--o{ PLOTS : "indexes"
+    RACE_FORECASTS ||--o{ RESULT_COMPARISON : "compared with actuals"
 ```
 
 ## Model Shape
@@ -348,7 +526,8 @@ erDiagram
 classDiagram
     class PollingModel {
       +weighted polling estimate
-      +sample and method weights
+      +sample-size weighting
+      +time decay and uncertainty
     }
     class FundamentalsModel {
       +partisan lean
@@ -357,7 +536,8 @@ classDiagram
     }
     class MarketModel {
       +public market probability
-      +liquidity and spread gate
+      +liquidity/spread gate
+      +normal probability-to-share map
     }
     class PublicSignalModel {
       +news and pageview signal
@@ -368,9 +548,9 @@ classDiagram
       +race-level normalization
     }
     class SimulationEngine {
-      +correlated errors
+      +national/region/office factors
       +Numba binary draw kernel
-      +control and ecosystem outputs
+      +thresholded control outputs
     }
 
     PollingModel --> EnsembleModel
@@ -400,6 +580,28 @@ flowchart TB
     calibration --> rewards
     coverage --> rewards
     ablation --> rewards
+```
+
+## Historical Comparison Flow
+
+```mermaid
+flowchart LR
+    forecast["2024 pre-election forecast run"]
+    actuals[("curated actual results")]
+    compare["results compare"]
+    table[/"result_comparison.parquet"/]
+    summary[/"result_comparison_summary.json"/]
+    html["result_comparison.html"]
+    plots[/"comparison plots"/]
+
+    forecast --> compare
+    actuals --> compare
+    compare --> table
+    compare --> summary
+    compare --> plots
+    table --> html
+    summary --> html
+    plots --> html
 ```
 
 ## Performance Flow
@@ -444,14 +646,35 @@ flowchart TD
 
 The engine distinguishes tracked races from forecastable races. Tier A/B races receive
 probabilistic outputs. Tier C races remain in the catalog, but trusted probabilities are
-withheld. The reward card checks provenance, reproducibility, sync integrity,
-calibration, baseline competition, component admission, sparse-race honesty,
-uncertainty quality, public-signal discipline, explainability, plot generation, and
-performance metadata.
+withheld. The reward card checks provenance, reproducibility fingerprints, sync
+integrity, calibration reporting, baseline competition, component admission,
+sparse-race honesty, uncertainty quality, public-signal discipline, explainability,
+plot generation, and performance metadata. Fixture-limited trust gates remain red rather
+than pretending that four historical rows validate the model.
 
 ## API Credentials
 
-No API credentials are needed to run the current fixture-backed engine, backtests,
-plots, diagnostics, or benchmarks. For live ingestion, see
-[`docs/api_requirements.md`](docs/api_requirements.md).
+No API credentials are needed to run the default fixture-backed engine, backtests,
+plots, diagnostics, or benchmarks. The first live source in `configs/sources_live.yaml`
+also runs keylessly because it consumes a public FiveThirtyEight/Datasette CSV stream.
+For live-ingestion expansion, see [`docs/api_requirements.md`](docs/api_requirements.md).
 
+Google Civic is optional. The current live path does not use `GOOGLE_CIVIC_API_KEY`, and
+Civic should not block polling, fundamentals, market, or historical-result ingestion.
+
+Current key names expected by the credential template:
+
+```bash
+awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {print $1}' .env.example
+```
+
+Remaining live-adapter implementation order:
+
+1. Fundamentals: Census, FRED, BEA/BLS, and public election-result archives.
+2. Race catalog: Google Civic and official state/federal race metadata.
+3. Polls: public poll feeds and pollster metadata.
+4. Markets: read-only Kalshi/Polymarket public data, with no trading credentials.
+5. Public signals: GDELT and Wikimedia/pageview-style public attention features.
+
+Until those adapters exist, a "full live run" means live polling plus deterministic
+support tables, plots, rewards, performance metadata, and the fixture scorecard.

@@ -125,15 +125,23 @@ weighted_share(option) =
   sum(weight_poll * poll_pct_option) / sum(weight_poll)
 
 weight_poll =
-  sqrt(sample_size)
+  sample_size
   * population_weight
   * methodology_weight
   * sponsor_weight
+  * exp_time_decay
 ```
 
-The output is converted into a win-probability-like component score through a logistic
-mapping around 50 percent share. This is a placeholder for a future hierarchical polling
-model.
+Poll rows can also receive configured pollster/option house-effect adjustments. The
+component reports a posterior-uncertainty proxy from binomial sampling variance,
+weighted poll dispersion, and a nonsampling-error floor. Win probability is computed as:
+
+```text
+poll_win_probability = Phi((weighted_share - 0.5) / posterior_sigma)
+```
+
+This is still not the full frontier polling model. It is a deterministic approximation
+that keeps uncertainty attached to the same signal used by the simulator.
 
 Planned frontier upgrade:
 
@@ -202,7 +210,7 @@ Current output:
 
 ```text
 win_probability = latest_public_market_probability
-vote_share_proxy = 0.5 + (probability - 0.5) * 0.35
+vote_share_proxy = 0.5 + market_sigma * Phi^-1(probability) - favorite_longshot_bias
 ```
 
 Markets should never be used for trading in this repo. The model consumes read-only
@@ -230,6 +238,11 @@ ensemble_score =
   / sum(component_weight for admitted components)
 ```
 
+Vote-share estimates are normalized within race after blending. Marginal win
+probabilities are not renormalized across options; they are reported from the component
+blend and the final race probabilities should be read from simulation-derived forecast
+rows.
+
 Current trusted components:
 
 ```yaml
@@ -253,6 +266,8 @@ The simulation layer converts ensemble point estimates into joint outcome distri
 It generates race-option draws with:
 
 - National correlated error.
+- Region correlated error.
+- Office-type correlated error.
 - Race/local heavy-tailed error.
 - Tier-specific uncertainty.
 - Turnout variation.
@@ -262,16 +277,32 @@ Two-option race simulation:
 
 ```text
 share_0_draw =
-  clamp(ensemble_share_0 + national_error_draw + local_error_race_draw, 0.02, 0.98)
+  clamp(
+    ensemble_share_0
+    + national_error_draw
+    + region_error_draw
+    + office_error_draw
+    + local_error_race_draw,
+    0.02,
+    0.98
+  )
 
 share_1_draw = 1 - share_0_draw
 
 winner = argmax(share_0_draw, share_1_draw)
 ```
 
+The current correlation structure is a structured factor model, not a learned
+state-by-state covariance matrix. It is materially better than independent race draws,
+but it should be replaced by a residual covariance model once enough historical races
+are available.
+
 Control forecasts are derived from draw-level winners by control body and party. This is
 important because control probabilities are not independent race probabilities; they are
-functions of correlated race outcomes.
+functions of correlated race outcomes. Control probabilities are evaluated against
+configured control thresholds when available; otherwise they fall back to a majority of
+modeled seats. Tipping-point races are ranked by simulated pivotal rate: how often
+flipping that race changes whether the party reaches the threshold.
 
 Ecosystem forecasts use draw-level outcomes to estimate:
 
@@ -279,6 +310,11 @@ Ecosystem forecasts use draw-level outcomes to estimate:
 - Recount probability from close margins.
 - Certification-risk probability as a close-margin derived event.
 - Ballot-measure support flag.
+
+Demographic turnout composition and certification risk are currently explicit
+placeholders/proxies. The artifact marks demographic composition as not estimated and
+labels certification risk as a close-margin proxy rather than a calibrated legal or
+administrative-risk model.
 
 ## 6. Backtesting And Calibration
 
@@ -304,14 +340,81 @@ Metrics:
 Reward use:
 
 - `R4_calibration` confirms calibration metrics are reported.
-- `R5_baseline_competition` checks whether the ensemble beats or matches baseline.
-- `R6_component_admission` checks trusted components against ablation evidence.
-- `R8_uncertainty_quality` checks interval coverage against tolerance.
+- `R5_baseline_competition` checks whether the ensemble beats or matches baseline only
+  when a rolling-origin backtest with enough rows has run.
+- `R6_component_admission` checks trusted components against ablation evidence only
+  under the same rolling-origin and sample-size requirements.
+- `R8_uncertainty_quality` checks interval coverage against tolerance only under the
+  same rolling-origin and sample-size requirements.
 
 Calibration is not optional. A model with visually attractive projections but poor
 coverage or poor probability calibration should not be treated as trusted.
 
-## 7. Diagnostics And Plots
+The fixture-backed implementation reports metrics and plots but does not certify
+baseline competition, component admission, or uncertainty quality. Those rewards remain
+red until the production backtest runner fits on prior cycles and evaluates on held-out
+cycles with enough race rows.
+
+## 7. Historical Result Comparison
+
+Historical comparison is different from rolling-origin backtesting. Backtesting scores
+stored historical prediction fixtures across components. Result comparison takes a
+specific forecast run and joins it to known actual results.
+
+Example:
+
+```bash
+uv run election-outcomes forecast run --as-of 2024-10-01 --run-id 2024-presidential
+uv run election-outcomes results compare \
+  --forecast-run-id 2024-presidential \
+  --comparison-id 2024-presidential-actuals \
+  --cycle 2024 \
+  --office-type president
+```
+
+The comparison table includes:
+
+- Forecast winner probability.
+- Forecast mean vote share.
+- Actual vote share.
+- Actual winner flag.
+- Predicted winner flag.
+- Vote-share error.
+- Absolute vote-share error.
+- Brier contribution.
+
+Summary metrics:
+
+- Winner accuracy.
+- Mean absolute vote-share error.
+- Brier score.
+- Upset count.
+
+In the current fixture-backed implementation, the 2024 presidential example covers
+`US-PRES-WI-2024`. A full presidential production run should extend the same comparison
+contract across all state-level presidential races, then add Electoral College outcome
+comparison once live results and state-level race metadata are ingested.
+
+```mermaid
+flowchart TD
+    forecast[/"race_forecasts.parquet"/]
+    results[/"results.parquet"/]
+    filter{"cycle + office filters"}
+    join["join on race_id + option_id"]
+    row_metrics["row-level errors"]
+    race_metrics["winner accuracy and upsets"]
+    report["comparison HTML + plots"]
+
+    forecast --> filter
+    results --> filter
+    filter --> join
+    join --> row_metrics
+    join --> race_metrics
+    row_metrics --> report
+    race_metrics --> report
+```
+
+## 8. Diagnostics And Plots
 
 Forecast runs produce both machine-readable artifacts and human-readable diagnostics.
 
@@ -329,6 +432,12 @@ Plot families:
 The HTML diagnostics page embeds these visuals and includes reward state, scorecards,
 source counts, and backtest payloads.
 
+Forecast runs also write `reproducibility_fingerprint.json`. The fingerprint hashes
+stable table/text/JSON artifacts while excluding volatile retrieval timestamp and
+incremental-sync status fields. `R1_reproducibility` passes only when a later run with
+the same `run_id` matches the previous stable fingerprint; a first run records the hash
+but is not by itself proof of rerun reproducibility.
+
 ```mermaid
 flowchart TD
     forecast[/"forecast artifacts"/]
@@ -345,7 +454,7 @@ flowchart TD
     rewards --> html
 ```
 
-## 8. Performance Approach
+## 9. Performance Approach
 
 Performance policy:
 
@@ -381,7 +490,7 @@ The performance reward `R12_performance_contract` verifies that the run records 
 requested engine, actual engine, parallel mode, Numba availability, thread count, and
 simulation count.
 
-## 9. Source Expansion Path
+## 10. Source Expansion Path
 
 The fixture-backed implementation is designed to make live ingestion incremental rather
 than disruptive.
@@ -404,7 +513,7 @@ Each adapter must:
 - Fail visibly in the source manifest.
 - Produce curated tables compatible with the existing feature layer.
 
-## 10. Limitations
+## 11. Limitations
 
 Current limitations:
 
@@ -420,7 +529,7 @@ Current limitations:
 These limitations are acceptable for the scaffold because the artifact, reward,
 diagnostic, and performance contracts are already testable.
 
-## 11. Acceptance Standard
+## 12. Acceptance Standard
 
 The repo is acceptable only when:
 
@@ -439,4 +548,3 @@ uv run election-outcomes forecast run --as-of 2026-05-08 --run-id full-diagnosti
 uv run election-outcomes backtest run --run-id full-diagnostic-backtest
 uv run election-outcomes benchmark run --as-of 2026-05-08 --run-id full-diagnostic-perf
 ```
-
