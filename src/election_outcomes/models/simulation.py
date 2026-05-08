@@ -33,6 +33,20 @@ class SimulationEngine:
             "A": float(uncertainty.get("tier_a_sigma", 0.035)),
             "B": float(uncertainty.get("tier_b_sigma", 0.075)),
         }
+        self.heavy_tail_df = max(float(uncertainty.get("heavy_tail_df", 5)), 2.5)
+        self.heavy_tail_scale = float(np.sqrt(self.heavy_tail_df / (self.heavy_tail_df - 2.0)))
+        correlation = dict(config.get("correlation", {}))
+        self.national_sigma = float(correlation.get("national_sigma", 0.015))
+        self.region_sigma = float(correlation.get("region_sigma", 0.010))
+        self.office_sigma = float(correlation.get("office_sigma", 0.008))
+        self.geographic_groups = {
+            str(key): str(value)
+            for key, value in dict(correlation.get("geographic_groups", {})).items()
+        }
+        self.control_thresholds = {
+            str(key): int(value)
+            for key, value in dict(config.get("control_thresholds", {})).items()
+        }
         performance = dict(config.get("performance", {}))
         requested_engine = str(performance.get("engine", "numba"))
         self.parallel = bool(performance.get("parallel", True))
@@ -43,7 +57,7 @@ class SimulationEngine:
 
     def run(self, bundle: FeatureBundle, ensemble: pl.DataFrame) -> SimulationOutputs:
         draws = self._draws(bundle, ensemble)
-        forecasts = self._race_forecasts(bundle, draws)
+        forecasts = self._race_forecasts(bundle, draws, ensemble)
         control = self._control_forecasts(bundle, draws)
         ecosystem = self._ecosystem_forecasts(bundle, draws)
         return SimulationOutputs(draws, forecasts, control, ecosystem, self.performance_metadata())
@@ -77,7 +91,8 @@ class SimulationEngine:
         fundamentals = {row["race_id"]: row for row in bundle.fundamentals.iter_rows(named=True)}
         binary_specs: list[dict[str, object]] = []
         multi_option_specs: list[dict[str, object]] = []
-        national_error = rng.normal(0, 0.015, self.draw_count)
+        national_error = rng.normal(0, self.national_sigma, self.draw_count)
+        systematic_errors = self._systematic_errors(catalog, rng)
         for race_id, options in options_by_race.items():
             race = catalog[race_id]
             if race["tier"] == "C" or race_id not in estimates:
@@ -94,9 +109,10 @@ class SimulationEngine:
                         "options": options,
                         "first_share": float(first["vote_share"]),
                         "turnout_base": self._turnout_base(str(race_id), fundamentals),
-                        "local_error": rng.standard_t(df=5, size=self.draw_count)
+                        "local_error": systematic_errors[race_id]
+                        + rng.standard_t(df=self.heavy_tail_df, size=self.draw_count)
                         * sigma
-                        / np.sqrt(5 / 3),
+                        / self.heavy_tail_scale,
                     }
                 )
                 continue
@@ -106,9 +122,10 @@ class SimulationEngine:
                     "options": options,
                     "estimate_rows": estimate_rows,
                     "turnout_base": self._turnout_base(str(race_id), fundamentals),
-                    "local_error": rng.standard_t(df=5, size=self.draw_count)
+                    "systematic_error": systematic_errors[race_id],
+                    "local_error": rng.standard_t(df=self.heavy_tail_df, size=self.draw_count)
                     * sigma
-                    / np.sqrt(5 / 3),
+                    / self.heavy_tail_scale,
                 }
             )
 
@@ -203,8 +220,15 @@ class SimulationEngine:
             options = spec["options"]
             option_shares = self._multi_option_shares(spec["estimate_rows"], rng)
             turnout_base = float(spec["turnout_base"])
+            systematic_error = spec["systematic_error"]
+            local_error = spec["local_error"]
             for draw_id in range(self.draw_count):
-                shares = [float(series[draw_id]) for series in option_shares]
+                shares = self._apply_multi_option_error(
+                    [float(series[draw_id]) for series in option_shares],
+                    float(
+                        national_error[draw_id] + systematic_error[draw_id] + local_error[draw_id]
+                    ),
+                )
                 winner_index = int(np.argmax(shares))
                 turnout = round(turnout_base * max(0.6, 1 + national_error[draw_id]))
                 for index, option in enumerate(options.iter_rows(named=True)):
@@ -221,6 +245,50 @@ class SimulationEngine:
                         }
                     )
         return pl.DataFrame(rows)
+
+    def _systematic_errors(
+        self,
+        catalog: dict[str, dict[str, object]],
+        rng: np.random.Generator,
+    ) -> dict[str, np.ndarray]:
+        regions = sorted(
+            {self._region_for_race(row) for row in catalog.values() if row.get("tier") != "C"}
+        )
+        offices = sorted(
+            {str(row.get("office_type")) for row in catalog.values() if row.get("tier") != "C"}
+        )
+        region_errors = {
+            region: rng.normal(0, self.region_sigma, self.draw_count) for region in regions
+        }
+        office_errors = {
+            office: rng.normal(0, self.office_sigma, self.draw_count) for office in offices
+        }
+        return {
+            race_id: region_errors[self._region_for_race(row)]
+            + office_errors[str(row.get("office_type"))]
+            for race_id, row in catalog.items()
+            if row.get("tier") != "C"
+        }
+
+    def _region_for_race(self, race: dict[str, object]) -> str:
+        geography = str(race.get("geography") or "")
+        state = geography.split("-")[0]
+        return self.geographic_groups.get(state, state or "unknown")
+
+    @staticmethod
+    def _apply_multi_option_error(shares: list[float], error: float) -> list[float]:
+        if len(shares) <= 1:
+            return list(shares)
+        arr = np.clip(np.array(shares, dtype=np.float64), 1e-6, None)
+        log_shares = np.log(arr)
+        centered = log_shares - log_shares.mean()
+        spread = max(float(np.std(centered)), 1e-3)
+        perturbed = log_shares + error * (centered / spread)
+        perturbed = perturbed - perturbed.max()
+        new_shares = np.exp(perturbed)
+        new_shares = new_shares / new_shares.sum()
+        new_shares = np.clip(new_shares, 0.02, 0.98)
+        return (new_shares / new_shares.sum()).tolist()
 
     def _multi_option_shares(
         self,
@@ -239,20 +307,39 @@ class SimulationEngine:
         turnout_rate = float(row.get("historical_turnout_rate") or 0.5)
         return voters * turnout_rate
 
-    def _race_forecasts(self, bundle: FeatureBundle, draws: pl.DataFrame) -> pl.DataFrame:
+    def _race_forecasts(
+        self, bundle: FeatureBundle, draws: pl.DataFrame, ensemble: pl.DataFrame
+    ) -> pl.DataFrame:
         catalog = bundle.race_catalog
         options = bundle.options
+        driver_columns = [
+            "race_id",
+            "option_id",
+            "explanation",
+            "component_contributions",
+            "uncertainty",
+        ]
+        drivers = (
+            ensemble.select([column for column in driver_columns if column in ensemble.columns])
+            if not ensemble.is_empty()
+            else pl.DataFrame()
+        )
+        if not drivers.is_empty():
+            drivers = drivers.rename(
+                {"explanation": "top_drivers", "uncertainty": "model_uncertainty"}
+            )
         if draws.is_empty():
             base = options.join(
                 catalog.select(["race_id", "tier", "tier_reason"]), on="race_id", how="left"
             )
-            return base.select(
+            empty = base.select(
                 "race_id",
                 "option_id",
                 "tier",
                 "tier_reason",
                 pl.lit(None, dtype=pl.Float64).alias("winner_probability"),
             )
+            return self._attach_forecast_explainability(empty, drivers)
         intervals = draws.group_by(["race_id", "option_id"]).agg(
             pl.col("winner").mean().alias("winner_probability"),
             pl.col("vote_share").mean().alias("vote_share_mean"),
@@ -270,7 +357,7 @@ class SimulationEngine:
             catalog.select(["race_id", "tier", "tier_reason"]), on="race_id", how="left"
         )
         joined = base.join(intervals, on=["race_id", "option_id"], how="left")
-        return joined.with_columns(
+        forecast = joined.with_columns(
             pl.when(pl.col("tier") == "C")
             .then(None)
             .otherwise(pl.col("winner_probability"))
@@ -280,43 +367,141 @@ class SimulationEngine:
             .otherwise(pl.lit("trusted_probability"))
             .alias("data_quality_flags"),
         )
+        return self._attach_forecast_explainability(forecast, drivers)
+
+    @staticmethod
+    def _attach_forecast_explainability(
+        forecast: pl.DataFrame, drivers: pl.DataFrame
+    ) -> pl.DataFrame:
+        if not drivers.is_empty():
+            forecast = forecast.join(drivers, on=["race_id", "option_id"], how="left")
+        for column in ("top_drivers", "component_contributions", "model_uncertainty"):
+            if column not in forecast.columns:
+                forecast = forecast.with_columns(pl.lit(None).alias(column))
+        return forecast.with_columns(
+            pl.when(pl.col("tier") == "C")
+            .then(pl.lit("probability withheld by tier gate"))
+            .otherwise(pl.col("top_drivers").fill_null("no admitted component"))
+            .alias("top_drivers"),
+            pl.when(pl.col("tier") == "C")
+            .then(pl.lit("{}"))
+            .otherwise(pl.col("component_contributions").fill_null("{}"))
+            .alias("component_contributions"),
+            pl.when(pl.col("tier") == "C")
+            .then(pl.lit("Tier C has insufficient validated data for probability output."))
+            .otherwise(
+                pl.concat_str(
+                    [
+                        pl.lit("Simulation uncertainty combines component posterior proxy, "),
+                        pl.lit("tier floor, heavy-tailed local residuals, and systematic factors."),
+                    ]
+                )
+            )
+            .alias("uncertainty_explanation"),
+        )
 
     def _control_forecasts(self, bundle: FeatureBundle, draws: pl.DataFrame) -> pl.DataFrame:
         if draws.is_empty():
             return pl.DataFrame()
-        winner_draws = draws.filter(pl.col("winner")).join(
-            bundle.race_catalog.select(["race_id", "office_type", "control_body"]),
+        catalog = bundle.race_catalog.select(["race_id", "office_type", "control_body", "seats"])
+        joined = draws.join(
+            catalog,
             on="race_id",
             how="left",
-        )
+        ).filter(pl.col("control_body").is_not_null())
+        winner_draws = joined.filter(pl.col("winner"))
         rows: list[dict[str, object]] = []
-        for key, group in winner_draws.group_by(["control_body", "party"], maintain_order=True):
+        for key, _group in joined.group_by(["control_body", "party"], maintain_order=True):
             control_body, party = key
             if not control_body:
                 continue
-            counts = (
-                group.group_by("draw_id").agg(pl.len().alias("seat_count"))["seat_count"].to_numpy()
+            party_winners = winner_draws.filter(
+                (pl.col("control_body") == control_body) & (pl.col("party") == party)
             )
-            tipping = (
-                group.group_by("race_id")
-                .agg(pl.len().alias("wins"))
-                .sort("wins")
-                .head(3)["race_id"]
-                .to_list()
+            counts_by_draw = (
+                party_winners.group_by("draw_id")
+                .agg(pl.col("seats").sum().alias("seat_count"))
+                .sort("draw_id")
+            )
+            count_map = {
+                row["draw_id"]: float(row["seat_count"])
+                for row in counts_by_draw.iter_rows(named=True)
+            }
+            counts = np.array([count_map.get(draw_id, 0.0) for draw_id in range(self.draw_count)])
+            modeled_seats = self._modeled_seats(joined, str(control_body))
+            threshold = self._control_threshold(str(control_body), modeled_seats)
+            tipping = self._pivotal_races(
+                joined=joined,
+                counts=counts,
+                control_body=str(control_body),
+                party=str(party),
+                threshold=threshold,
             )
             rows.append(
                 {
                     "control_body": control_body,
                     "party": party,
+                    "control_threshold": threshold,
+                    "modeled_seats": modeled_seats,
+                    "control_scope": "configured_threshold"
+                    if str(control_body) in self.control_thresholds
+                    else "modeled_races_majority",
                     "seat_count_mean": float(np.mean(counts)),
                     "seat_count_p10": float(np.quantile(counts, 0.10)),
                     "seat_count_p50": float(np.quantile(counts, 0.50)),
                     "seat_count_p90": float(np.quantile(counts, 0.90)),
-                    "control_probability": float(np.mean(counts >= max(np.median(counts), 1))),
-                    "tipping_point_races": json.dumps(tipping),
+                    "control_probability": float(np.mean(counts >= threshold)),
+                    "tipping_point_races": json.dumps(
+                        [item["race_id"] for item in tipping[:3]], sort_keys=True
+                    ),
+                    "pivotal_rates": json.dumps(tipping[:3], sort_keys=True),
                 }
             )
         return pl.DataFrame(rows)
+
+    def _control_threshold(self, control_body: str, modeled_seats: int) -> int:
+        return self.control_thresholds.get(control_body, max(modeled_seats // 2 + 1, 1))
+
+    @staticmethod
+    def _modeled_seats(joined: pl.DataFrame, control_body: str) -> int:
+        return int(
+            joined.filter(pl.col("control_body") == control_body)
+            .select(["race_id", "seats"])
+            .unique()
+            .select(pl.col("seats").sum())
+            .item()
+            or 0
+        )
+
+    def _pivotal_races(
+        self,
+        joined: pl.DataFrame,
+        counts: np.ndarray,
+        control_body: str,
+        party: str,
+        threshold: int,
+    ) -> list[dict[str, object]]:
+        rows = []
+        body_party = joined.filter(
+            (pl.col("control_body") == control_body) & (pl.col("party") == party)
+        )
+        for race_id, group in body_party.group_by("race_id", maintain_order=True):
+            race_key = str(race_id[0] if isinstance(race_id, tuple) else race_id)
+            seat_count = int(group.select(pl.col("seats").max()).item() or 1)
+            wins = {
+                row["draw_id"]: bool(row["winner"])
+                for row in group.select(["draw_id", "winner"]).iter_rows(named=True)
+            }
+            pivotal = 0
+            for draw_id in range(self.draw_count):
+                party_won_race = wins.get(draw_id, False)
+                count = counts[draw_id]
+                if party_won_race and count >= threshold and count - seat_count < threshold:
+                    pivotal += 1
+                elif (not party_won_race) and count < threshold and count + seat_count >= threshold:
+                    pivotal += 1
+            rows.append({"race_id": race_key, "pivotal_rate": pivotal / self.draw_count})
+        return sorted(rows, key=lambda item: item["pivotal_rate"], reverse=True)
 
     def _ecosystem_forecasts(self, bundle: FeatureBundle, draws: pl.DataFrame) -> pl.DataFrame:
         catalog = {row["race_id"]: row for row in bundle.race_catalog.iter_rows(named=True)}
@@ -337,10 +522,17 @@ class SimulationEngine:
                     "turnout_p10": float(np.quantile(turnout, 0.10)),
                     "turnout_p90": float(np.quantile(turnout, 0.90)),
                     "demographic_composition": json.dumps(
-                        {"supported": bool(catalog[race_key]["tier"] != "C")}
+                        {
+                            "status": "placeholder",
+                            "supported": False,
+                            "reason": "No group-level turnout model is implemented yet.",
+                        },
+                        sort_keys=True,
                     ),
+                    "demographic_model_status": "placeholder_not_estimated",
                     "recount_probability": float(np.mean(margins <= 0.01)),
                     "certification_risk_probability": float(np.mean(margins <= 0.005) * 0.6),
+                    "certification_risk_model": "close_margin_proxy_not_calibrated",
                     "ballot_measure_supported": bool(
                         catalog[race_key]["race_type"] == "ballot_measure"
                     ),

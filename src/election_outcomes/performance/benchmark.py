@@ -74,7 +74,7 @@ class PerformanceBenchmark:
     @staticmethod
     def _ensemble(bundle: FeatureBundle, model_config: dict[str, Any]) -> pl.DataFrame:
         estimates = [
-            PollingModel().run(bundle),
+            PollingModel(model_config).run(bundle),
             FundamentalsModel().run(bundle),
             MarketModel(model_config).run(bundle),
             PublicSignalModel(

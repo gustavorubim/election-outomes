@@ -44,14 +44,30 @@ def score_predictions(
 def _calibration_line(probability: np.ndarray, actual: np.ndarray) -> tuple[float, float]:
     if len(np.unique(probability)) < 2:
         return 0.0, float(np.mean(actual))
-    slope, intercept = np.polyfit(probability, actual, deg=1)
+    logit_probability = np.log(probability / (1.0 - probability))
+    design = np.column_stack([np.ones_like(logit_probability), logit_probability])
+    beta = np.zeros(2)
+    ridge = 1e-3
+    for _ in range(25):
+        eta = design @ beta
+        fitted = 1.0 / (1.0 + np.exp(-eta))
+        weights = np.clip(fitted * (1.0 - fitted), 1e-6, None)
+        hessian = design.T @ (weights[:, None] * design) + ridge * np.eye(2)
+        gradient = design.T @ (actual - fitted) - ridge * beta
+        step = np.linalg.solve(hessian, gradient)
+        beta += step
+        if float(np.max(np.abs(step))) < 1e-8:
+            break
+    intercept, slope = beta
     return float(slope), float(intercept)
 
 
 def _expected_calibration_error(
     probability: np.ndarray, actual: np.ndarray, bins: int = 5
 ) -> float:
-    edges = np.linspace(0, 1, bins + 1)
+    quantiles = np.linspace(0, 1, min(bins, len(probability)) + 1)
+    unique_edges = np.unique(np.quantile(probability, quantiles))
+    edges = unique_edges if unique_edges.size > 1 else np.linspace(0, 1, bins + 1)
     total = len(probability)
     error = 0.0
     for lower, upper in pairwise(edges):

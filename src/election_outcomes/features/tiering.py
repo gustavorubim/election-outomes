@@ -16,6 +16,29 @@ class TierAssessor:
         public_signals: pl.DataFrame,
     ) -> pl.DataFrame:
         counts = self._counts(races, polls, markets, fundamentals, public_signals)
+        tier_a = dict(self.config.get("tier_a", {}))
+        tier_b = dict(self.config.get("tier_b", {}))
+        min_polls = int(tier_a.get("min_polls", 2))
+        min_pollsters = int(tier_a.get("min_pollsters", 2))
+        min_market_quotes = int(tier_a.get("min_market_quotes", 1))
+        min_fundamental_rows = int(tier_a.get("min_fundamental_rows", 1))
+        min_any_signal_rows = int(tier_b.get("min_any_signal_rows", 1))
+        tier_c_reason = str(
+            self.config.get("tier_c", {}).get("reason", "Insufficient validated data.")
+        )
+        has_a_polling = (pl.col("poll_count") >= min_polls) & (
+            pl.col("pollster_count") >= min_pollsters
+        )
+        has_a_market = pl.col("market_count") >= min_market_quotes
+        has_fundamentals = pl.col("fundamental_count") >= min_fundamental_rows
+        any_signal = (
+            pl.col("poll_count")
+            + pl.col("market_count")
+            + pl.col("fundamental_count")
+            + pl.col("public_signal_count")
+        )
+        tier_a_condition = has_fundamentals & (has_a_polling | has_a_market)
+        tier_b_condition = (any_signal >= min_any_signal_rows) & has_fundamentals
         return (
             races.join(counts, on="race_id", how="left")
             .with_columns(
@@ -28,23 +51,19 @@ class TierAssessor:
                 ]
             )
             .with_columns(
-                pl.struct(
-                    [
-                        "poll_count",
-                        "pollster_count",
-                        "market_count",
-                        "fundamental_count",
-                        "public_signal_count",
-                        "race_type",
-                    ]
-                )
-                .map_elements(
-                    self._tier_for_row,
-                    return_dtype=pl.Struct({"tier": pl.String, "tier_reason": pl.String}),
-                )
-                .alias("tier_struct")
+                pl.when(tier_a_condition)
+                .then(pl.lit("A"))
+                .when(tier_b_condition)
+                .then(pl.lit("B"))
+                .otherwise(pl.lit("C"))
+                .alias("tier"),
+                pl.when(tier_a_condition)
+                .then(pl.lit("Validated polls/markets plus fundamentals."))
+                .when(tier_b_condition)
+                .then(pl.lit("Sparse forecast with fundamentals and wide uncertainty."))
+                .otherwise(pl.lit(tier_c_reason))
+                .alias("tier_reason"),
             )
-            .unnest("tier_struct")
         )
 
     def _counts(
@@ -69,27 +88,3 @@ class TierAssessor:
         for frame in frames[1:]:
             result = result.join(frame, on="race_id", how="left")
         return result
-
-    def _tier_for_row(self, row: dict[str, object]) -> dict[str, str]:
-        tier_a = self.config.get("tier_a", {})
-        tier_b = self.config.get("tier_b", {})
-        poll_count = int(row["poll_count"] or 0)
-        pollster_count = int(row["pollster_count"] or 0)
-        market_count = int(row["market_count"] or 0)
-        fundamental_count = int(row["fundamental_count"] or 0)
-        public_count = int(row["public_signal_count"] or 0)
-        has_a_polling = poll_count >= int(tier_a.get("min_polls", 2)) and pollster_count >= int(
-            tier_a.get("min_pollsters", 2)
-        )
-        has_a_market = market_count >= int(tier_a.get("min_market_quotes", 1))
-        has_fundamentals = fundamental_count >= int(tier_a.get("min_fundamental_rows", 1))
-        if has_fundamentals and (has_a_polling or has_a_market):
-            return {"tier": "A", "tier_reason": "Validated polls/markets plus fundamentals."}
-        any_signal = poll_count + market_count + fundamental_count + public_count
-        if any_signal >= int(tier_b.get("min_any_signal_rows", 1)) and has_fundamentals:
-            return {
-                "tier": "B",
-                "tier_reason": "Sparse forecast with fundamentals and wide uncertainty.",
-            }
-        reason = str(self.config.get("tier_c", {}).get("reason", "Insufficient validated data."))
-        return {"tier": "C", "tier_reason": reason}

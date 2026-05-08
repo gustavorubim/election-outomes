@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import polars as pl
 
 from election_outcomes.features import FeatureBundle
@@ -35,6 +37,7 @@ class EnsembleModel:
                 continue
             weighted_probability = weighted_share = weight_total = uncertainty_total = 0.0
             drivers: list[str] = []
+            contributions: dict[str, dict[str, float]] = {}
             for row in group.iter_rows(named=True):
                 component = str(row["component"])
                 admitted = bool(row["admitted"]) and self.trusted.get(component, False)
@@ -46,6 +49,13 @@ class EnsembleModel:
                 uncertainty_total += weight * float(row["uncertainty"])
                 weight_total += weight
                 drivers.append(component)
+                contributions[component] = {
+                    "weight": weight,
+                    "win_probability": float(row["win_probability"]),
+                    "vote_share": float(row["vote_share"]),
+                    "weighted_win_probability": weight * float(row["win_probability"]),
+                    "weighted_vote_share": weight * float(row["vote_share"]),
+                }
             if weight_total <= 0:
                 continue
             rows.append(
@@ -58,23 +68,18 @@ class EnsembleModel:
                     "uncertainty": uncertainty_total / weight_total,
                     "admitted": True,
                     "explanation": " + ".join(drivers),
+                    "component_contributions": json.dumps(contributions, sort_keys=True),
                 }
             )
-        return self._normalize_by_race(normalize_rows(rows))
+        return self._normalize_vote_share_by_race(normalize_rows(rows))
 
     @staticmethod
-    def _normalize_by_race(frame: pl.DataFrame) -> pl.DataFrame:
+    def _normalize_vote_share_by_race(frame: pl.DataFrame) -> pl.DataFrame:
         if frame.is_empty():
             return frame
-        totals = frame.group_by("race_id").agg(
-            pl.col("win_probability").sum().alias("prob_total"),
-            pl.col("vote_share").sum().alias("share_total"),
-        )
+        totals = frame.group_by("race_id").agg(pl.col("vote_share").sum().alias("share_total"))
         return (
             frame.join(totals, on="race_id", how="left")
-            .with_columns(
-                (pl.col("win_probability") / pl.col("prob_total")).alias("win_probability"),
-                (pl.col("vote_share") / pl.col("share_total")).alias("vote_share"),
-            )
-            .drop(["prob_total", "share_total"])
+            .with_columns((pl.col("vote_share") / pl.col("share_total")).alias("vote_share"))
+            .drop(["share_total"])
         )

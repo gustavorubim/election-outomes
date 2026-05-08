@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ class RewardEvaluator:
         tier_c_ok = self._tier_c_withheld(race_forecasts, race_catalog)
         ensemble_metrics = backtest_payload.get("metrics", {}).get("ensemble", {})
         ablations = backtest_payload.get("ablations", {})
+        reproducibility = self._reproducibility_status(artifact_dir)
+        trustworthy_backtest = self._trustworthy_backtest(backtest_payload)
         return {
             "run_id": run_id,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -38,9 +41,13 @@ class RewardEvaluator:
                     "detail": "External gate: uv sync, ruff, format check, pytest coverage.",
                 },
                 "R1_reproducibility": {
-                    "passed": self._artifacts_exist(artifact_dir),
-                    "metric": int(self._artifacts_exist(artifact_dir)),
-                    "detail": "Deterministic artifact contract exists for fixed inputs and run id.",
+                    "passed": reproducibility["cross_run_verified"],
+                    "metric": reproducibility,
+                    "detail": (
+                        "Stable artifact fingerprint is generated on every run. This reward "
+                        "passes only after rerunning the same run id with unchanged inputs and "
+                        "matching the previous fingerprint."
+                    ),
                 },
                 "R2_provenance": {
                     "passed": provenance_share >= 1.0,
@@ -60,12 +67,17 @@ class RewardEvaluator:
                     "detail": "Historical backtest reports calibration and scoring metrics.",
                 },
                 "R5_baseline_competition": {
-                    "passed": ablations.get("ensemble", {}).get("beats_or_matches_baseline", False),
+                    "passed": trustworthy_backtest
+                    and ablations.get("ensemble", {}).get("beats_or_matches_baseline", False),
                     "metric": ablations.get("ensemble", {}),
-                    "detail": "Trusted ensemble must beat or match baseline Brier score.",
+                    "detail": (
+                        "Trusted ensemble must beat or match baseline Brier score on a "
+                        "rolling-origin backtest with enough rows."
+                    ),
                 },
                 "R6_component_admission": {
-                    "passed": all(
+                    "passed": trustworthy_backtest
+                    and all(
                         item.get("beats_or_matches_baseline", False)
                         for key, item in ablations.items()
                         if key in {"polling", "fundamentals", "markets", "ensemble"}
@@ -79,9 +91,12 @@ class RewardEvaluator:
                     "detail": "Tier C races withhold trusted probabilities.",
                 },
                 "R8_uncertainty_quality": {
-                    "passed": self._coverage_ok(ensemble_metrics),
+                    "passed": trustworthy_backtest and self._coverage_ok(ensemble_metrics),
                     "metric": ensemble_metrics.get("interval_90_coverage"),
-                    "detail": "Historical intervals report empirical coverage near nominal.",
+                    "detail": (
+                        "Historical intervals report empirical coverage near nominal on a "
+                        "rolling-origin backtest with enough rows."
+                    ),
                 },
                 "R9_public_signal_discipline": {
                     "passed": not self.model_config.get("trusted_components", {}).get(
@@ -128,6 +143,7 @@ class RewardEvaluator:
             "methodology_snapshot.md",
             "plot_manifest.json",
             "performance.json",
+            "reproducibility_fingerprint.json",
         }
         return all((artifact_dir / name).exists() for name in required)
 
@@ -135,7 +151,19 @@ class RewardEvaluator:
     def _provenance_share(race_forecasts: pl.DataFrame, source_manifest: pl.DataFrame) -> float:
         if race_forecasts.is_empty() or source_manifest.is_empty():
             return 0.0
-        return float(source_manifest.filter(pl.col("content_hash").is_not_null()).height > 0)
+        required = {"model_config_hash", "source_manifest_hash"}
+        if not required.issubset(set(race_forecasts.columns)):
+            return 0.0
+        forecast_rows = race_forecasts.filter(
+            pl.col("model_config_hash").is_not_null()
+            & (pl.col("model_config_hash") != "")
+            & pl.col("source_manifest_hash").is_not_null()
+            & (pl.col("source_manifest_hash") != "")
+        ).height
+        manifest_rows = source_manifest.filter(
+            pl.col("content_hash").is_not_null() & (pl.col("content_hash") != "")
+        ).height
+        return min(forecast_rows / race_forecasts.height, manifest_rows / source_manifest.height)
 
     @staticmethod
     def _tier_c_withheld(race_forecasts: pl.DataFrame, race_catalog: pl.DataFrame) -> bool:
@@ -156,7 +184,13 @@ class RewardEvaluator:
 
     @staticmethod
     def _has_explainability(race_forecasts: pl.DataFrame) -> bool:
-        required = {"tier_reason", "data_quality_flags"}
+        required = {
+            "tier_reason",
+            "data_quality_flags",
+            "top_drivers",
+            "component_contributions",
+            "uncertainty_explanation",
+        }
         return required.issubset(set(race_forecasts.columns)) and race_forecasts.height > 0
 
     @staticmethod
@@ -176,5 +210,31 @@ class RewardEvaluator:
         if not required.issubset(performance):
             return False
         if performance["requested_engine"] == "numba":
-            return bool(performance["numba_available"]) and performance["engine"] == "numba"
+            if performance["numba_available"]:
+                return performance["engine"] == "numba"
+            return performance["engine"] == "python"
         return performance["engine"] in {"numba", "python"}
+
+    @staticmethod
+    def _reproducibility_status(artifact_dir: Path) -> dict[str, Any]:
+        path = artifact_dir / "reproducibility_fingerprint.json"
+        if not path.exists():
+            return {
+                "fingerprint_exists": False,
+                "cross_run_verified": False,
+                "combined_hash": None,
+            }
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return {
+            "fingerprint_exists": True,
+            "cross_run_verified": bool(payload.get("cross_run_verified")),
+            "compared_to_previous": bool(payload.get("compared_to_previous")),
+            "combined_hash": payload.get("combined_hash"),
+        }
+
+    @staticmethod
+    def _trustworthy_backtest(backtest_payload: dict[str, Any]) -> bool:
+        return bool(backtest_payload.get("rolling_origin_executed")) and not bool(
+            backtest_payload.get("sample_size_too_small")
+        )

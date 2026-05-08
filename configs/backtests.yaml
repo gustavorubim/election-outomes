@@ -1,6 +1,7 @@
 rolling_origin:
   holdout_cycles: [2022, 2024]
   min_races: 2
+minimum_rows_for_trust: 30
 metrics:
   - brier
   - log_score
@@ -13,4 +14,3 @@ baselines:
   - market_implied
   - incumbent_party_prior
   - previous_cycle_swing
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -45,8 +46,8 @@ class ForecastPipeline:
         model_config = self.context.read_yaml("model.yaml")
         source_manifest = pl.read_parquet(self.context.curated_dir / "source_manifest.parquet")
         component_estimates = [
-            PollingModel().run(bundle),
-            FundamentalsModel().run(bundle),
+            PollingModel(model_config, as_of=as_of).run(bundle),
+            FundamentalsModel(model_config).fit(full_bundle).run(bundle),
             MarketModel(model_config).run(bundle),
             PublicSignalModel(
                 trusted=bool(
@@ -59,6 +60,7 @@ class ForecastPipeline:
         race_forecasts = self._attach_lineage(outputs.race_forecasts, model_config, source_manifest)
         race_catalog = self._attach_model_hash(bundle.race_catalog, model_config)
         out_dir = self.context.artifacts_dir / "runs" / run_id
+        previous_fingerprint = self._read_reproducibility_fingerprint(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         write_parquet(race_catalog, out_dir / "race_catalog.parquet")
@@ -88,15 +90,7 @@ class ForecastPipeline:
             run_id, as_of, model_config, source_manifest.height
         )
         write_text(methodology, out_dir / "methodology_snapshot.md")
-        diagnostics = DiagnosticsReport().render(
-            run_id,
-            race_catalog,
-            race_forecasts,
-            source_manifest,
-            backtest_payload,
-            plot_manifest=plot_manifest,
-        )
-        write_text(diagnostics, out_dir / "diagnostics.html")
+        self._write_reproducibility_fingerprint(out_dir, previous_fingerprint)
         reward_card = RewardEvaluator(model_config).evaluate(
             run_id,
             out_dir,
@@ -233,13 +227,27 @@ class ForecastPipeline:
                 else frame
             )
 
+        def by_race_and_date(frame: pl.DataFrame, column: str) -> pl.DataFrame:
+            filtered = by_race(frame)
+            if column not in filtered.columns:
+                return filtered
+            dates = pl.col(column)
+            if filtered.schema[column] != pl.Date:
+                dates = (
+                    pl.col(column)
+                    .cast(pl.Utf8)
+                    .str.slice(0, 10)
+                    .str.strptime(pl.Date, strict=False)
+                )
+            return filtered.filter(dates <= cutoff)
+
         return replace(
             bundle,
             races=by_race(bundle.races),
             options=by_race(bundle.options),
-            polls=by_race(bundle.polls),
-            markets=by_race(bundle.markets),
-            public_signals=by_race(bundle.public_signals),
+            polls=by_race_and_date(bundle.polls, "end_date"),
+            markets=by_race_and_date(bundle.markets, "observed_at"),
+            public_signals=by_race_and_date(bundle.public_signals, "observed_at"),
             fundamentals=by_race(bundle.fundamentals),
             results=by_race(bundle.results),
             race_catalog=active_catalog,
@@ -266,6 +274,70 @@ class ForecastPipeline:
 
     @staticmethod
     def _config_hash(model_config: dict[str, Any]) -> str:
-        import json
-
         return hashlib.sha256(json.dumps(model_config, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _read_reproducibility_fingerprint(out_dir: Path) -> dict[str, Any] | None:
+        path = out_dir / "reproducibility_fingerprint.json"
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _write_reproducibility_fingerprint(
+        out_dir: Path, previous: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        stable_artifacts = {
+            name: ForecastPipeline._stable_artifact_hash(out_dir / name)
+            for name in [
+                "race_catalog.parquet",
+                "race_forecasts.parquet",
+                "forecast_draws.parquet",
+                "control_forecasts.parquet",
+                "ecosystem_forecasts.parquet",
+                "source_manifest.parquet",
+                "methodology_snapshot.md",
+                "plot_manifest.json",
+                "performance.json",
+            ]
+        }
+        combined_hash = hashlib.sha256(
+            json.dumps(stable_artifacts, sort_keys=True).encode()
+        ).hexdigest()
+        previous_hash = str(previous.get("combined_hash")) if previous else None
+        payload: dict[str, Any] = {
+            "status": "fingerprint_generated",
+            "excluded_fields": ["generated_at", "retrieved_at", "status"],
+            "stable_artifacts": stable_artifacts,
+            "combined_hash": combined_hash,
+            "compared_to_previous": previous_hash is not None,
+            "previous_combined_hash": previous_hash,
+            "cross_run_verified": previous_hash == combined_hash if previous_hash else False,
+        }
+        write_json(payload, out_dir / "reproducibility_fingerprint.json")
+        return payload
+
+    @staticmethod
+    def _stable_artifact_hash(path: Path) -> str:
+        if path.suffix == ".parquet":
+            frame = pl.read_parquet(path)
+            ignored = [
+                column
+                for column in ("generated_at", "retrieved_at", "status")
+                if column in frame.columns
+            ]
+            if ignored:
+                frame = frame.drop(ignored)
+            if frame.columns:
+                frame = frame.sort(frame.columns)
+            rows = frame.to_dicts()
+            payload = json.dumps(rows, sort_keys=True, default=str)
+        elif path.suffix == ".json":
+            with path.open("r", encoding="utf-8") as handle:
+                payload_obj = json.load(handle)
+            payload = json.dumps(payload_obj, sort_keys=True, default=str)
+        else:
+            payload = path.read_text(encoding="utf-8")
+        return hashlib.sha256(payload.encode()).hexdigest()

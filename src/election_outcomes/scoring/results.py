@@ -142,7 +142,9 @@ class ResultComparator:
                 "race_id": race_id,
             },
             "row_count": comparison.height,
-            "race_count": comparison["race_id"].n_unique() if "race_id" in comparison.columns else 0,
+            "race_count": comparison["race_id"].n_unique()
+            if "race_id" in comparison.columns
+            else 0,
         }
         if comparison.is_empty():
             return {
@@ -161,9 +163,7 @@ class ResultComparator:
         winner_eval = predicted_winners.join(actual_winners, on="race_id", how="inner")
         winner_accuracy = (
             winner_eval.select(
-                (
-                    pl.col("predicted_winner_option_id") == pl.col("actual_winner_option_id")
-                ).mean()
+                (pl.col("predicted_winner_option_id") == pl.col("actual_winner_option_id")).mean()
             ).item()
             if not winner_eval.is_empty()
             else None
@@ -206,9 +206,7 @@ class ResultComparator:
         return manifest
 
     @staticmethod
-    def _add_plot(
-        manifest: dict[str, list[dict[str, str]]], path: Path | None, title: str
-    ) -> None:
+    def _add_plot(manifest: dict[str, list[dict[str, str]]], path: Path | None, title: str) -> None:
         if path is None:
             return
         manifest["comparison"].append({"title": title, "path": f"plots/{path.name}"})
@@ -272,9 +270,11 @@ class ResultComparator:
                     "absolute_vote_share_error",
                 ]
             ).iter_rows(named=True):
-                rows += "<tr>" + "".join(
-                    f"<td>{html.escape(str(value))}</td>" for value in row.values()
-                ) + "</tr>"
+                rows += (
+                    "<tr>"
+                    + "".join(f"<td>{html.escape(str(value))}</td>" for value in row.values())
+                    + "</tr>"
+                )
         return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Result Comparison</title></head>
@@ -296,4 +296,3 @@ alt="Winner probability versus actual outcome"></figure>
 </body>
 </html>
 """
-

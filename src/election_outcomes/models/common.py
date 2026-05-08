@@ -10,6 +10,10 @@ def logistic(value: float) -> float:
     return 1.0 / (1.0 + math.exp(-value))
 
 
+def normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
 def clamp(value: float, low: float = 0.01, high: float = 0.99) -> float:
     return min(high, max(low, value))
 

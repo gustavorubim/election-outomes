@@ -1,4 +1,4 @@
-model_version: "0.1.0-hybrid-fixture"
+model_version: "0.1.1-structured-fixture"
 seed: 20260508
 simulation_count: 1000
 performance:
@@ -17,13 +17,81 @@ component_weights:
   fundamentals: 0.30
   markets: 0.20
   public_signals: 0.05
+polling:
+  half_life_days: 21
+  min_nonsampling_error: 0.035
+  pollster_house_effects: {}
 uncertainty:
   tier_a_sigma: 0.035
   tier_b_sigma: 0.075
   heavy_tail_df: 5
+correlation:
+  national_sigma: 0.015
+  region_sigma: 0.010
+  office_sigma: 0.008
+  geographic_groups:
+    # Census Bureau 4-region map. Unmapped geographies fall into their own per-state group.
+    CT: northeast
+    ME: northeast
+    MA: northeast
+    NH: northeast
+    RI: northeast
+    VT: northeast
+    NJ: northeast
+    NY: northeast
+    PA: northeast
+    IL: midwest
+    IN: midwest
+    MI: midwest
+    OH: midwest
+    WI: midwest
+    IA: midwest
+    KS: midwest
+    MN: midwest
+    MO: midwest
+    NE: midwest
+    ND: midwest
+    SD: midwest
+    DE: south
+    FL: south
+    GA: south
+    MD: south
+    NC: south
+    SC: south
+    VA: south
+    DC: south
+    WV: south
+    AL: south
+    KY: south
+    MS: south
+    TN: south
+    AR: south
+    LA: south
+    OK: south
+    TX: south
+    AZ: west
+    CO: west
+    ID: west
+    MT: west
+    NV: west
+    NM: west
+    UT: west
+    WY: west
+    AK: west
+    CA: west
+    HI: west
+    OR: west
+    WA: west
+control_thresholds:
+  president: 1
+  senate: 1
+  house: 1
+  local: 1
 market_adjustments:
   min_open_interest: 1000
   max_spread: 0.18
+  probability_to_share_sigma: 0.08
+  favorite_longshot_bias: 0.0
 public_signal_admission:
   max_brier_delta_vs_baseline: 0.0
   leakage_check_required: true
@@ -31,3 +99,4 @@ reward_thresholds:
   provenance_min_share: 1.0
   interval_coverage_tolerance: 0.12
   reproducibility_required: true
+  minimum_backtest_rows: 30
