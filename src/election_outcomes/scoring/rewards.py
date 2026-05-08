@@ -31,6 +31,7 @@ class RewardEvaluator:
         ablations = backtest_payload.get("ablations", {})
         reproducibility = self._reproducibility_status(artifact_dir)
         trustworthy_backtest = self._trustworthy_backtest(backtest_payload)
+        sync_breakdown = self._sync_breakdown(source_manifest)
         return {
             "run_id": run_id,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -55,10 +56,13 @@ class RewardEvaluator:
                     "detail": "Forecast rows trace to non-empty source hashes.",
                 },
                 "R3_sync_integrity": {
-                    "passed": source_manifest.filter(pl.col("status") == "failed").is_empty(),
-                    "metric": source_manifest.height,
+                    "passed": (
+                        source_manifest.filter(pl.col("status") == "failed").is_empty()
+                        and sync_breakdown["failed_auth"] == 0
+                    ),
+                    "metric": sync_breakdown,
                     "detail": (
-                        "All configured sources are recorded with status and hash or failure."
+                        "All configured sources are recorded with status, hash, and auth mode."
                     ),
                 },
                 "R4_calibration": {
@@ -238,3 +242,31 @@ class RewardEvaluator:
         return bool(backtest_payload.get("rolling_origin_executed")) and not bool(
             backtest_payload.get("sample_size_too_small")
         )
+
+    @staticmethod
+    def _sync_breakdown(source_manifest: pl.DataFrame) -> dict[str, int]:
+        breakdown = {
+            "total": int(source_manifest.height),
+            "fetched": 0,
+            "unchanged": 0,
+            "failed": 0,
+            "failed_auth": 0,
+            "by_auth_mode": {},
+        }
+        if source_manifest.is_empty():
+            return breakdown
+        for row in (
+            source_manifest.group_by("status").agg(pl.len().alias("count")).iter_rows(named=True)
+        ):
+            status_value = row.get("status")
+            key = str(status_value) if status_value else "unknown"
+            breakdown[key] = breakdown.get(key, 0) + int(row["count"])
+        if "auth_mode" in source_manifest.columns:
+            for row in (
+                source_manifest.group_by("auth_mode")
+                .agg(pl.len().alias("count"))
+                .iter_rows(named=True)
+            ):
+                mode = row.get("auth_mode")
+                breakdown["by_auth_mode"][str(mode) if mode else "none"] = int(row["count"])
+        return breakdown

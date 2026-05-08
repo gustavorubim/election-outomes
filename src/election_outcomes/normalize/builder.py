@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -55,6 +56,16 @@ class CuratedDataBuilder:
     }
     BOOL_COLUMNS: ClassVar[set[str]] = {"incumbent", "winner", "actual_winner", "leakage_checked"}
     INT_COLUMNS: ClassVar[set[str]] = {"cycle", "seats", "sample_size"}
+    UNIQUE_KEYS_BY_TABLE: ClassVar[dict[str, list[str]]] = {
+        "races": ["race_id"],
+        "options": ["race_id", "option_id"],
+        "polls": ["poll_id", "race_id", "option_id"],
+        "market_quotes": ["market_id", "race_id", "option_id", "observed_at"],
+        "public_signals": ["signal_id", "race_id", "option_id", "observed_at"],
+        "fundamentals": ["race_id", "as_of"],
+        "results": ["race_id", "option_id"],
+        "backtest_predictions": ["race_id", "option_id", "cycle"],
+    }
 
     def __init__(self, context: ProjectContext) -> None:
         self.context = context
@@ -73,7 +84,10 @@ class CuratedDataBuilder:
             table_frames.setdefault(table, []).append(frame)
         tables = {
             table: self._canonical_order(
-                pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
+                self._dedupe(
+                    pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0],
+                    table,
+                )
             )
             for table, frames in table_frames.items()
         }
@@ -95,14 +109,36 @@ class CuratedDataBuilder:
         if frame.columns:
             frame = frame.filter(pl.col(frame.columns[0]).is_not_null())
         parser_version = str(row["parser_version"])
+        parser_args = self._parser_args_from_row(row)
         if parser_version == "fivethirtyeight-president-polls-v1":
-            frame = self._normalize_538_president_polls(frame)
+            frame = self._normalize_538_president_polls(frame, parser_args)
         frame = self._coerce(frame)
         return frame.with_columns(
             pl.lit(row["source_id"]).alias("source_id"),
             pl.lit(row["content_hash"]).alias("source_hash"),
             pl.lit(row["parser_version"]).alias("parser_version"),
         )
+
+    @staticmethod
+    def _parser_args_from_row(row: dict[str, object]) -> dict[str, object]:
+        raw = row.get("parser_args")
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(str(raw))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _dedupe(cls, frame: pl.DataFrame, table: str) -> pl.DataFrame:
+        keys = cls.UNIQUE_KEYS_BY_TABLE.get(table)
+        if not keys:
+            return frame
+        present = [key for key in keys if key in frame.columns]
+        if not present:
+            return frame
+        return frame.unique(subset=present, keep="first", maintain_order=True)
 
     @staticmethod
     def _canonical_order(frame: pl.DataFrame) -> pl.DataFrame:
@@ -119,7 +155,9 @@ class CuratedDataBuilder:
         sort_columns = [column for column in priority if column in frame.columns]
         return frame.sort(sort_columns) if sort_columns else frame
 
-    def _normalize_538_president_polls(self, frame: pl.DataFrame) -> pl.DataFrame:
+    def _normalize_538_president_polls(
+        self, frame: pl.DataFrame, parser_args: dict[str, object] | None = None
+    ) -> pl.DataFrame:
         required = {
             "cycle",
             "state",
@@ -141,6 +179,12 @@ class CuratedDataBuilder:
         missing = required.difference(frame.columns)
         if missing:
             raise ValueError(f"FiveThirtyEight president polls missing columns: {sorted(missing)}")
+        args = parser_args or {}
+        cycle = int(args.get("cycle", 2020))
+        state_lower = str(args.get("state", "wisconsin")).lower()
+        stage_lower = str(args.get("stage", "general")).lower()
+        race_id = str(args.get("race_id", f"US-PRES-{state_lower.upper()[:2]}-{cycle}"))
+        parties = list(args.get("parties") or ["DEM", "REP"])
         return (
             frame.with_columns(
                 pl.col("cycle").cast(pl.Int64, strict=False),
@@ -151,10 +195,10 @@ class CuratedDataBuilder:
                 self._date_expr("end_date"),
             )
             .filter(
-                (pl.col("cycle") == 2020)
-                & (pl.col("_state_lower") == "wisconsin")
-                & (pl.col("_stage_lower") == "general")
-                & pl.col("candidate_party").is_in(["DEM", "REP"])
+                (pl.col("cycle") == cycle)
+                & (pl.col("_state_lower") == state_lower)
+                & (pl.col("_stage_lower") == stage_lower)
+                & pl.col("candidate_party").is_in(parties)
                 & pl.col("pct").is_not_null()
             )
             .select(
@@ -168,7 +212,7 @@ class CuratedDataBuilder:
                         pl.col("candidate_party"),
                     ]
                 ).alias("poll_id"),
-                pl.lit("US-PRES-WI-2020").alias("race_id"),
+                pl.lit(race_id).alias("race_id"),
                 pl.col("pollster").fill_null("unknown").alias("pollster"),
                 "start_date",
                 "end_date",
@@ -187,7 +231,7 @@ class CuratedDataBuilder:
                 .alias("sponsor_class"),
                 self._methodology_expr().alias("methodology"),
                 pl.concat_str(
-                    [pl.lit("US-PRES-WI-2020-"), pl.col("candidate_party").str.slice(0, 1)]
+                    [pl.lit(f"{race_id}-"), pl.col("candidate_party").str.slice(0, 1)]
                 ).alias("option_id"),
                 pl.col("pct").cast(pl.Float64, strict=False).alias("pct"),
             )

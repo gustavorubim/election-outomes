@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -13,6 +15,16 @@ import polars as pl
 from election_outcomes.config import ProjectContext
 from election_outcomes.ingest.sources import SourceDefinition, SourceRegistry
 from election_outcomes.storage.io import read_json, write_json, write_parquet
+
+HTTP_RETRY_ATTEMPTS = 3
+HTTP_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+HTTP_MAX_BYTES = 500 * 1024 * 1024
+HTTP_ALLOWED_CONTENT_TYPES = (
+    "text/csv",
+    "text/plain",
+    "application/csv",
+    "application/octet-stream",
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +105,7 @@ class SyncRunner:
                 "content_hash": content_hash,
                 "license": source.license,
                 "parser_version": source.parser_version,
+                "parser_args": source.parser_args_json(),
                 "auth_mode": source.auth_mode,
                 "status": "fetched" if did_fetch else "unchanged",
                 "error": "",
@@ -107,12 +120,7 @@ class SyncRunner:
         previous: dict[str, str],
         retrieved_at: str,
     ) -> tuple[dict[str, object], bool]:
-        request = urllib.request.Request(
-            source.url,
-            headers={"User-Agent": "election-outcomes/0.1 (+research forecast sync)"},
-        )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            payload = response.read()
+        payload = self._http_get_with_retry(source.url)
         content_hash = hashlib.sha256(payload).hexdigest()
         suffix = self._http_suffix(source)
         raw_path = self.context.raw_dir / source.id / f"{content_hash}{suffix}"
@@ -130,6 +138,7 @@ class SyncRunner:
                 "content_hash": content_hash,
                 "license": source.license,
                 "parser_version": source.parser_version,
+                "parser_args": source.parser_args_json(),
                 "auth_mode": source.auth_mode,
                 "status": "fetched" if did_fetch else "unchanged",
                 "error": "",
@@ -137,6 +146,41 @@ class SyncRunner:
             },
             did_fetch,
         )
+
+    @staticmethod
+    def _http_get_with_retry(url: str) -> bytes:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "election-outcomes/0.1 (+research forecast sync)"},
+        )
+        last_exc: Exception | None = None
+        for attempt in range(HTTP_RETRY_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    raw_type = response.headers.get("Content-Type") or ""
+                    content_type = raw_type.split(";")[0].strip().lower()
+                    if content_type and not any(
+                        content_type.startswith(allowed) for allowed in HTTP_ALLOWED_CONTENT_TYPES
+                    ):
+                        raise ValueError(f"Unexpected content-type {content_type!r} from {url}")
+                    declared = response.headers.get("Content-Length")
+                    if declared is not None and int(declared) > HTTP_MAX_BYTES:
+                        raise ValueError(
+                            f"Payload {int(declared)} bytes exceeds max {HTTP_MAX_BYTES}: {url}"
+                        )
+                    payload = response.read(HTTP_MAX_BYTES + 1)
+                    if len(payload) > HTTP_MAX_BYTES:
+                        raise ValueError(
+                            f"Payload exceeds max {HTTP_MAX_BYTES} bytes while reading: {url}"
+                        )
+                    return payload
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                last_exc = exc
+                if attempt < HTTP_RETRY_ATTEMPTS - 1:
+                    time.sleep(HTTP_BACKOFF_SECONDS[attempt])
+        raise RuntimeError(
+            f"HTTP fetch failed after {HTTP_RETRY_ATTEMPTS} attempts: {url}"
+        ) from last_exc
 
     @staticmethod
     def _http_suffix(source: SourceDefinition) -> str:
@@ -161,6 +205,7 @@ class SyncRunner:
             "content_hash": "",
             "license": source.license,
             "parser_version": source.parser_version,
+            "parser_args": source.parser_args_json(),
             "auth_mode": source.auth_mode,
             "status": "failed",
             "error": str(exc),

@@ -32,19 +32,23 @@ class MarketModel:
                 continue
             latest = filtered.sort("observed_at").tail(1).row(0, named=True)
             probability = clamp(float(latest["probability"]), 0.001, 0.999)
-            implied_margin = NormalDist().inv_cdf(probability) * share_sigma
+            normal = NormalDist()
+            inv_cdf = normal.inv_cdf(probability)
+            implied_margin = inv_cdf * share_sigma
+            density = max(normal.pdf(inv_cdf), 1e-3)
+            spread_in_share = float(latest["spread"]) * share_sigma / density
             rows.append(
                 {
                     "race_id": race_id,
                     "option_id": option_id,
                     "component": self.component,
-                    "win_probability": probability,
+                    "marginal_win_probability": probability,
                     "vote_share": clamp(0.5 + implied_margin - favorite_longshot_bias),
-                    "uncertainty": max(float(latest["spread"]), share_sigma),
+                    "uncertainty": max(spread_in_share, share_sigma),
                     "admitted": True,
                     "explanation": (
                         "Public market probability inverted through a calibrated-normal "
-                        "share scale and gated by liquidity/spread."
+                        "share scale; spread mapped to share-units via local CDF derivative."
                     ),
                 }
             )

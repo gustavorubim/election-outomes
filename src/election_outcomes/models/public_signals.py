@@ -28,7 +28,7 @@ class PublicSignalModel:
                     "race_id": race_id,
                     "option_id": option_id,
                     "component": self.component,
-                    "win_probability": probability,
+                    "marginal_win_probability": probability,
                     "vote_share": clamp(0.5 + z_score * 0.025),
                     "uncertainty": 0.12,
                     "admitted": self.trusted and leakage_checked,

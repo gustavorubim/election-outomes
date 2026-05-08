@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from election_outcomes.config import ProjectContext
 
@@ -16,6 +18,10 @@ class SourceDefinition:
     license: str
     url: str
     auth_mode: str = "none"
+    parser_args: dict[str, Any] = field(default_factory=dict)
+
+    def parser_args_json(self) -> str:
+        return json.dumps(self.parser_args, sort_keys=True)
 
 
 class SourceRegistry:
@@ -30,6 +36,9 @@ class SourceRegistry:
             path = Path(item["path"]) if item.get("path") else None
             if path is not None and not path.is_absolute():
                 path = context.root / path
+            parser_args = item.get("parser_args") or {}
+            if not isinstance(parser_args, dict):
+                raise ValueError(f"parser_args for {item['id']} must be a mapping")
             sources.append(
                 SourceDefinition(
                     id=str(item["id"]),
@@ -40,6 +49,7 @@ class SourceRegistry:
                     license=str(item["license"]),
                     url=str(item["url"]),
                     auth_mode=str(item.get("auth_mode", "none")),
+                    parser_args=dict(parser_args),
                 )
             )
         return cls(sources)

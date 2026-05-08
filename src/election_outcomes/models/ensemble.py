@@ -44,16 +44,17 @@ class EnsembleModel:
                 if not admitted:
                     continue
                 weight = self.weights.get(component, 0.0)
-                weighted_probability += weight * float(row["win_probability"])
+                marginal = float(row["marginal_win_probability"])
+                weighted_probability += weight * marginal
                 weighted_share += weight * float(row["vote_share"])
                 uncertainty_total += weight * float(row["uncertainty"])
                 weight_total += weight
                 drivers.append(component)
                 contributions[component] = {
                     "weight": weight,
-                    "win_probability": float(row["win_probability"]),
+                    "marginal_win_probability": marginal,
                     "vote_share": float(row["vote_share"]),
-                    "weighted_win_probability": weight * float(row["win_probability"]),
+                    "weighted_marginal_win_probability": weight * marginal,
                     "weighted_vote_share": weight * float(row["vote_share"]),
                 }
             if weight_total <= 0:
@@ -63,7 +64,7 @@ class EnsembleModel:
                     "race_id": race_id,
                     "option_id": option_id,
                     "component": self.component,
-                    "win_probability": clamp(weighted_probability / weight_total),
+                    "marginal_win_probability": clamp(weighted_probability / weight_total),
                     "vote_share": clamp(weighted_share / weight_total),
                     "uncertainty": uncertainty_total / weight_total,
                     "admitted": True,

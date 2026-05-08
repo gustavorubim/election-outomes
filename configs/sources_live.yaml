@@ -21,6 +21,12 @@ sources:
     license: Public FiveThirtyEight/Datasette polling table; record terms before redistribution.
     auth_mode: public
     url: https://fivethirtyeight.datasettes.com/polls/president_polls.csv?_stream=on
+    parser_args:
+      cycle: 2020
+      state: wisconsin
+      stage: general
+      race_id: US-PRES-WI-2020
+      parties: [DEM, REP]
   - id: fixture_market_quotes
     table: market_quotes
     type: fixture

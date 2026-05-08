@@ -289,6 +289,8 @@ class ForecastPipeline:
     def _write_reproducibility_fingerprint(
         out_dir: Path, previous: dict[str, Any] | None
     ) -> dict[str, Any]:
+        # Scope: compares against `previous` from the same out_dir. Cross-environment
+        # reproducibility (CI vs local) requires shipping the fingerprint as a baseline.
         stable_artifacts = {
             name: ForecastPipeline._stable_artifact_hash(out_dir / name)
             for name in [

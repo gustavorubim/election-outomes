@@ -24,7 +24,7 @@ def empty_estimates(component: str) -> pl.DataFrame:
             "race_id": pl.String,
             "option_id": pl.String,
             "component": pl.String,
-            "win_probability": pl.Float64,
+            "marginal_win_probability": pl.Float64,
             "vote_share": pl.Float64,
             "uncertainty": pl.Float64,
             "admitted": pl.Boolean,

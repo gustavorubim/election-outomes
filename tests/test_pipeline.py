@@ -235,6 +235,36 @@ def test_http_sync_and_538_polls_normalizer(tmp_path: Path) -> None:
     assert _CuratedDataBuilderClass is CuratedDataBuilder
 
 
+def test_http_sync_retries_then_fails_on_unreachable_url(tmp_path: Path, monkeypatch) -> None:
+    from election_outcomes.ingest import sync as sync_module
+
+    ctx = ProjectContext.create(
+        root=ROOT,
+        data_dir=tmp_path / "data",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    bogus = SourceDefinition(
+        id="unreachable_csv",
+        table="polls",
+        type="http_csv",
+        path=None,
+        parser_version="fivethirtyeight-president-polls-v1",
+        license="Test fixture for retry path.",
+        url="http://127.0.0.1:1/missing.csv",
+        auth_mode="public",
+    )
+    monkeypatch.setattr(sync_module, "HTTP_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+    fixture_registry = SourceRegistry.from_context(ctx)
+    registry = SourceRegistry([*fixture_registry.sources, bogus])
+    result = SyncRunner(ctx, registry=registry).run()
+
+    failed_rows = result.manifest.filter(pl.col("source_id") == "unreachable_csv")
+    assert failed_rows.height == 1
+    assert failed_rows["status"].to_list() == ["failed"]
+    assert failed_rows["auth_mode"].to_list() == ["public"]
+    assert "HTTP fetch failed" in failed_rows["error"].to_list()[0]
+
+
 def test_fundamentals_ridge_fits_when_training_rows_meet_threshold(tmp_path: Path) -> None:
     _ctx, _sync, bundle = build_bundle(tmp_path)
     model_config = {"fundamentals": {"min_training_rows": 1, "ridge_alpha": 0.5}}

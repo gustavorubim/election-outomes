@@ -53,7 +53,7 @@ class FundamentalsModel:
                         "race_id": str(race_key),
                         "option_id": option_id,
                         "component": self.component,
-                        "win_probability": probability,
+                        "marginal_win_probability": probability,
                         "vote_share": normalized_share,
                         "uncertainty": self.uncertainty,
                         "admitted": True,

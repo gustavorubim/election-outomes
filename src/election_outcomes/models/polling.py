@@ -13,6 +13,8 @@ from election_outcomes.models.common import clamp, normal_cdf, normalize_rows
 class PollingModel:
     component = "polling"
 
+    # Hand-picked placeholder modifiers. Replace with coefficients fit on historical
+    # pollster-vs-actual residuals once `pollster_house_effects` carries learned values.
     POPULATION_WEIGHTS: ClassVar[dict[str, float]] = {"lv": 1.1, "rv": 1.0, "a": 0.85}
     METHODOLOGY_WEIGHTS: ClassVar[dict[str, float]] = {
         "live_phone": 1.1,
@@ -54,10 +56,14 @@ class PollingModel:
                     0.001,
                     0.999,
                 )
+                if weight <= 0:
+                    continue
                 weighted += weight * share
                 total_weight += weight
                 adjusted_shares.append(share)
                 weights.append(weight)
+            if total_weight <= 0:
+                continue
             share = clamp(weighted / total_weight)
             uncertainty = self._posterior_sigma(share, total_weight, adjusted_shares, weights)
             rows.append(
@@ -65,7 +71,7 @@ class PollingModel:
                     "race_id": race_id,
                     "option_id": option_id,
                     "component": self.component,
-                    "win_probability": normal_cdf((share - 0.5) / uncertainty),
+                    "marginal_win_probability": normal_cdf((share - 0.5) / uncertainty),
                     "vote_share": share,
                     "uncertainty": uncertainty,
                     "admitted": True,
@@ -79,7 +85,9 @@ class PollingModel:
 
     def _time_decay(self, end_date: object, as_of: date) -> float:
         poll_date = end_date if isinstance(end_date, date) else date.fromisoformat(str(end_date))
-        age_days = max((as_of - poll_date).days, 0)
+        age_days = (as_of - poll_date).days
+        if age_days < 0:
+            return 0.0
         return 0.5 ** (age_days / max(self.half_life_days, 1.0))
 
     def _house_effect(self, pollster: str, option_id: str) -> float:
