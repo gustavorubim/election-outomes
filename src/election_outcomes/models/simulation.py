@@ -282,6 +282,7 @@ class SimulationEngine:
     ) -> dict[str, np.ndarray]:
         active = {race_id: row for race_id, row in catalog.items() if row.get("tier") != "C"}
         groups = sorted({self._covariance_group_for_race(row) for row in active.values()})
+        regions = sorted({self._region_for_race(row) for row in active.values()})
         offices = sorted({str(row.get("office_type")) for row in active.values()})
         covariance_lookup = {
             (str(row["row_group"]), str(row["column_group"])): float(row["covariance"])
@@ -301,11 +302,15 @@ class SimulationEngine:
             mean=np.zeros(len(groups)), cov=matrix, size=self.draw_count
         ).T
         group_errors = {group: group_draws[index] for index, group in enumerate(groups)}
+        region_errors = {
+            region: rng.normal(0, self.region_sigma, self.draw_count) for region in regions
+        }
         office_errors = {
             office: rng.normal(0, self.office_sigma, self.draw_count) for office in offices
         }
         return {
             race_id: group_errors[self._covariance_group_for_race(row)]
+            + region_errors[self._region_for_race(row)]
             + office_errors[str(row.get("office_type"))]
             for race_id, row in active.items()
         }

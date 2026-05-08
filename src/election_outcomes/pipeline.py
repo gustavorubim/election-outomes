@@ -71,9 +71,10 @@ class ForecastPipeline:
         model_config = self._apply_component_admission(model_config, scenario_obj)
         residual_covariance = self._load_residual_covariance(scenario_obj)
         source_manifest = pl.read_parquet(self.context.curated_dir / "source_manifest.parquet")
+        fundamentals_model = FundamentalsModel(model_config).fit(training_bundle)
         component_estimates = [
             PollingModel(model_config, as_of=as_of).run(bundle),
-            FundamentalsModel(model_config).fit(training_bundle).run(bundle),
+            fundamentals_model.run(bundle),
             MarketModel(model_config).run(bundle),
             PublicSignalModel(
                 trusted=bool(
@@ -147,6 +148,7 @@ class ForecastPipeline:
             component_admission=backtest_artifacts.component_admission,
             residual_covariance=residual_covariance,
             source_manifest=source_manifest,
+            runtime_metadata={"fundamentals": fundamentals_model.fit_summary()},
         )
         write_text(model_card, out_dir / "model_card.md")
         self._write_reproducibility_fingerprint(out_dir, previous_fingerprint)
@@ -353,6 +355,12 @@ class ForecastPipeline:
             self.context.artifacts_dir / "backtests" / "latest" / f"component_admission_{key}.json"
         )
         if not path.exists():
+            updated["component_admission_source"] = {
+                "status": "missing",
+                "key": key,
+                "path": str(path),
+                "engine_using": "config_defaults",
+            }
             return updated
         with path.open("r", encoding="utf-8") as handle:
             admission = json.load(handle)
@@ -362,6 +370,13 @@ class ForecastPipeline:
             if isinstance(admission.get("component_weights"), dict):
                 updated["component_weights"] = admission["component_weights"]
             updated["component_admission"] = admission
+            updated["component_admission_source"] = {
+                "status": "learned",
+                "key": key,
+                "path": str(path),
+                "engine_using": str(admission.get("engine_using", "learned_admission")),
+                "admission_status": str(admission.get("admission_status", "unknown")),
+            }
         return updated
 
     def _load_residual_covariance(self, scenario: Scenario | None) -> pl.DataFrame | None:

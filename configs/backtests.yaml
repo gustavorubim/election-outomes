@@ -1,6 +1,7 @@
 rolling_origin:
   holdout_cycles: [2022, 2024]
   min_races: 2
+  as_of_offsets_days: [90, 60, 30, 7, 1]
 minimum_rows_for_trust: 30
 metrics:
   - brier

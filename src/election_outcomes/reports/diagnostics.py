@@ -371,6 +371,7 @@ class DiagnosticsReport:
             rows.append(
                 "<tr>"
                 f"<td>{html.escape(str(row.get('dimension')))}</td>"
+                f"<td>{html.escape(str(row.get('tier', 'n/a')))}</td>"
                 f"<td>{float(row.get('score', 0.0)):.2f}</td>"
                 f"<td>{html.escape(str(row.get('current')))}</td>"
                 "</tr>"
@@ -379,7 +380,8 @@ class DiagnosticsReport:
             f'<p class="benchmark-score">{float(payload.get("summary_score", 0.0)):.2f}</p>'
             f"<p>{html.escape(str(payload.get('status')))}</p>"
             '<p><a href="silver_benchmark.html">Open source-backed benchmark details</a></p>'
-            f"<table><thead><tr><th>Dimension</th><th>Score</th><th>Status</th></tr></thead>"
+            f"<table><thead><tr><th>Dimension</th><th>Tier</th><th>Score</th>"
+            f"<th>Status</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table>"
         )
 

@@ -26,6 +26,9 @@ class FundamentalsModel:
         self.min_training_rows = int(cfg.get("min_training_rows", 12))
         self.uncertainty = float(cfg.get("uncertainty", 0.08))
         self.coefficients: dict[str, float] = dict(self.DEFAULT_COEFFICIENTS)
+        self.intercept = 0.0
+        self.feature_means: dict[str, float] = {}
+        self.feature_stds: dict[str, float] = {}
         self.fit_status: str = "handpicked_default"
         self.training_rows: int = 0
 
@@ -65,6 +68,18 @@ class FundamentalsModel:
                 )
         return normalize_rows(rows)
 
+    def fit_summary(self) -> dict[str, object]:
+        return {
+            "component": self.component,
+            "fit_status": self.fit_status,
+            "training_rows": self.training_rows,
+            "ridge_alpha": self.ridge_alpha,
+            "intercept": self.intercept,
+            "coefficients": self.coefficients,
+            "feature_means": self.feature_means,
+            "feature_stds": self.feature_stds,
+        }
+
     def _raw_shares(
         self, options: pl.DataFrame, fundamental: dict[str, object]
     ) -> dict[str, float]:
@@ -81,6 +96,7 @@ class FundamentalsModel:
             finance = float(row.get("fundraising_usd") or 0.0)
             prediction = (
                 base
+                + self.intercept
                 + coef["partisan_lean"] * lean * sign
                 + coef["economic_index"] * economy * sign
                 + coef["demographic_turnout_index"] * demographic * sign
@@ -96,14 +112,27 @@ class FundamentalsModel:
         if training.height < self.min_training_rows:
             self.fit_status = f"handpicked_default (n={training.height} < {self.min_training_rows})"
             self.coefficients = dict(self.DEFAULT_COEFFICIENTS)
+            self.intercept = 0.0
+            self.feature_means = {}
+            self.feature_stds = {}
             return
         feature_names = list(self.DEFAULT_COEFFICIENTS.keys())
         x = training.select(feature_names).to_numpy().astype(np.float64)
         y = training["target"].to_numpy().astype(np.float64)
-        gram = x.T @ x + self.ridge_alpha * np.eye(x.shape[1])
-        coefs = np.linalg.solve(gram, x.T @ y)
-        self.coefficients = dict(zip(feature_names, coefs.tolist(), strict=True))
-        self.fit_status = f"ridge_fit (n={training.height}, alpha={self.ridge_alpha})"
+        means = x.mean(axis=0)
+        stds = x.std(axis=0)
+        stds = np.where(stds < 1e-12, 1.0, stds)
+        x_scaled = (x - means) / stds
+        design = np.column_stack([np.ones(x_scaled.shape[0]), x_scaled])
+        penalty = self.ridge_alpha * np.eye(design.shape[1])
+        penalty[0, 0] = 0.0
+        coefs_scaled = np.linalg.solve(design.T @ design + penalty, design.T @ y)
+        raw_coefs = coefs_scaled[1:] / stds
+        self.intercept = float(coefs_scaled[0] - np.sum((coefs_scaled[1:] * means) / stds))
+        self.coefficients = dict(zip(feature_names, raw_coefs.tolist(), strict=True))
+        self.feature_means = dict(zip(feature_names, means.tolist(), strict=True))
+        self.feature_stds = dict(zip(feature_names, stds.tolist(), strict=True))
+        self.fit_status = f"standardized_ridge_fit (n={training.height}, alpha={self.ridge_alpha})"
 
     @staticmethod
     def _training_frame(bundle: FeatureBundle) -> pl.DataFrame:

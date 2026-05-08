@@ -42,11 +42,14 @@ class SilverStyleBenchmark:
         residual_covariance: pl.DataFrame | None,
         source_manifest: pl.DataFrame,
     ) -> dict[str, Any]:
+        covariance_sample = self._covariance_sample_size(residual_covariance)
+        modeled_ev = self._modeled_presidential_seats(race_catalog)
+        sample_too_small = bool(backtest_payload.get("sample_size_too_small"))
         rows = [
             self._row(
                 "Poll inclusion and provenance",
                 "Broad professional-poll inclusion with documented exclusions and source history.",
-                self._has_table(source_manifest, "polls"),
+                "functional" if self._has_table(source_manifest, "polls") else "absent",
                 (
                     "Poll sources are manifest-tracked; richer pollster-quality metadata is "
                     "still needed."
@@ -55,7 +58,11 @@ class SilverStyleBenchmark:
             self._row(
                 "Poll weighting and house effects",
                 "Pollster quality, recency, sample-size diminishing returns, and house effects.",
-                bool(model_config.get("polling", {}).get("pollster_house_effects")),
+                (
+                    "functional"
+                    if model_config.get("polling", {}).get("half_life_days")
+                    else "scaffold"
+                ),
                 (
                     "Current polling has recency/sample weighting; learned pollster effects "
                     "are pending."
@@ -64,7 +71,13 @@ class SilverStyleBenchmark:
             self._row(
                 "Fundamentals layer",
                 "Partisan lean, incumbency, fundraising, economic and demographic inputs.",
-                self._has_table(source_manifest, "fundamentals"),
+                (
+                    "scaffold"
+                    if self._has_table(source_manifest, "fundamentals") and sample_too_small
+                    else "functional"
+                    if self._has_table(source_manifest, "fundamentals")
+                    else "absent"
+                ),
                 (
                     "Fundamentals exist and can ridge-fit, but live state-level fundamentals "
                     "are pending."
@@ -73,7 +86,7 @@ class SilverStyleBenchmark:
             self._row(
                 "Rolling-origin validation",
                 "Fit on prior cycles and score held-out cycles before trusting components.",
-                bool(backtest_payload.get("rolling_origin_executed")),
+                ("functional" if backtest_payload.get("rolling_origin_executed") else "absent"),
                 (
                     "Rolling-origin refit now runs; fixture sample remains too small for "
                     "trust rewards."
@@ -82,7 +95,13 @@ class SilverStyleBenchmark:
             self._row(
                 "Correlated election simulation",
                 "National, geographic, and race-level correlated errors in simulations.",
-                residual_covariance is not None and not residual_covariance.is_empty(),
+                (
+                    "functional"
+                    if covariance_sample >= 30
+                    else "scaffold"
+                    if residual_covariance is not None and not residual_covariance.is_empty()
+                    else "functional"
+                ),
                 (
                     "Simulation can consume residual covariance; broad historical covariance "
                     "is pending."
@@ -94,13 +113,22 @@ class SilverStyleBenchmark:
                     "Translate state probabilities into Electoral College outcomes and "
                     "top-line visuals."
                 ),
-                self._has_presidential_rows(race_catalog, race_forecasts),
-                "Presidential scenario emits EC distribution for available state races.",
+                (
+                    "functional"
+                    if modeled_ev >= 270
+                    else "scaffold"
+                    if self._has_presidential_rows(race_catalog, race_forecasts)
+                    else "absent"
+                ),
+                (
+                    f"Presidential reporting is wired, but only {modeled_ev} electoral votes "
+                    "are present in this scenario."
+                ),
             ),
             self._row(
                 "Insight surface",
                 "Expose drivers, uncertainty, tipping points, and forecast-vs-actual diagnostics.",
-                self._has_driver_columns(race_forecasts),
+                "functional" if self._has_driver_columns(race_forecasts) else "scaffold",
                 "Diagnostics include driver rows and comparison narratives.",
             ),
         ]
@@ -122,6 +150,7 @@ class SilverStyleBenchmark:
         rows = "".join(
             "<tr>"
             f"<td>{html.escape(row['dimension'])}</td>"
+            f"<td>{html.escape(row['tier'])}</td>"
             f"<td>{html.escape(str(row['score']))}</td>"
             f"<td>{html.escape(row['target'])}</td>"
             f"<td>{html.escape(row['current'])}</td>"
@@ -142,7 +171,9 @@ class SilverStyleBenchmark:
 <p>Summary score: {payload["summary_score"]:.3f}</p>
 <p>{html.escape(payload["note"])}</p>
 <table>
-<thead><tr><th>Dimension</th><th>Score</th><th>Target</th><th>Current Engine</th></tr></thead>
+<thead>
+<tr><th>Dimension</th><th>Tier</th><th>Score</th><th>Target</th><th>Current</th></tr>
+</thead>
 <tbody>{rows}</tbody>
 </table>
 <h2>Source Anchors</h2>
@@ -152,11 +183,19 @@ class SilverStyleBenchmark:
 """
 
     @staticmethod
-    def _row(dimension: str, target: str, implemented: bool, current: str) -> dict[str, Any]:
+    def _row(dimension: str, target: str, tier: str, current: str) -> dict[str, Any]:
+        score_by_tier = {
+            "absent": 0.0,
+            "scaffold": 0.33,
+            "functional": 0.66,
+            "production": 1.0,
+        }
+        normalized_tier = tier if tier in score_by_tier else "absent"
         return {
             "dimension": dimension,
             "target": target,
-            "score": 1.0 if implemented else 0.35,
+            "tier": normalized_tier,
+            "score": score_by_tier[normalized_tier],
             "current": current,
         }
 
@@ -166,6 +205,8 @@ class SilverStyleBenchmark:
             return "near public-methodology parity"
         if score >= 0.65:
             return "partial parity; core validation still maturing"
+        if score >= 0.45:
+            return "partial parity; core validation maturing"
         return "early parity; major statistical layers pending"
 
     @staticmethod
@@ -188,6 +229,23 @@ class SilverStyleBenchmark:
     def _has_driver_columns(race_forecasts: pl.DataFrame) -> bool:
         required = {"top_drivers", "component_contributions", "uncertainty_explanation"}
         return not race_forecasts.is_empty() and required.issubset(set(race_forecasts.columns))
+
+    @staticmethod
+    def _modeled_presidential_seats(race_catalog: pl.DataFrame) -> int:
+        if race_catalog.is_empty() or "seats" not in race_catalog.columns:
+            return 0
+        presidential = race_catalog.filter(pl.col("office_type") == "president")
+        return 0 if presidential.is_empty() else int(presidential["seats"].sum())
+
+    @staticmethod
+    def _covariance_sample_size(residual_covariance: pl.DataFrame | None) -> int:
+        if (
+            residual_covariance is None
+            or residual_covariance.is_empty()
+            or "sample_size" not in residual_covariance.columns
+        ):
+            return 0
+        return int(residual_covariance["sample_size"].max())
 
 
 def benchmark_to_json(payload: dict[str, Any]) -> str:

@@ -190,7 +190,10 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     assert all(path.exists() and path.stat().st_size > 0 for path in plot_paths)
     benchmark = json.loads((out_dir / "silver_benchmark.json").read_text(encoding="utf-8"))
     assert "Silver/FiveThirtyEight" in benchmark["benchmark_name"]
-    assert 0.0 <= benchmark["summary_score"] <= 1.0
+    assert 0.0 <= benchmark["summary_score"] <= 0.75
+    assert {row["tier"] for row in benchmark["rows"]}.issubset(
+        {"absent", "scaffold", "functional", "production"}
+    )
     diagnostics = (out_dir / "diagnostics.html").read_text(encoding="utf-8")
     assert "Scenario Scope" in diagnostics
     assert "Model Drivers" in diagnostics
@@ -210,6 +213,9 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
     performance = json.loads((out_dir / "performance.json").read_text(encoding="utf-8"))
     assert performance["engine"] in {"numba", "python"}
     assert performance["simulation_count"] == 1000
+    model_card = (out_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "Admission source" in model_card
+    assert "standardized_ridge_fit" in model_card or "handpicked_default" in model_card
 
 
 def test_forecast_requires_as_of_without_scenario(tmp_path: Path) -> None:
@@ -230,13 +236,17 @@ def test_backtest_and_report_rebuild(tmp_path: Path) -> None:
     report_dir = pipeline.rebuild_report("reportable")
     backtest_dir = ctx.artifacts_dir / "backtests" / "bt"
 
-    assert payload["row_count"] == 4
+    assert payload["row_count"] == 12
     assert payload["rolling_origin_executed"] is True
     assert payload["sample_size_too_small"] is True
     assert (backtest_dir / "scorecard.json").exists()
     assert (backtest_dir / "rolling_predictions.parquet").exists()
     assert (backtest_dir / "component_admission.json").exists()
     assert (backtest_dir / "residual_covariance.parquet").exists()
+    rolling = pl.read_parquet(backtest_dir / "rolling_predictions.parquet")
+    assert set(rolling["as_of_offset_days"].unique().to_list()) == {1, 7, 30}
+    covariance = pl.read_parquet(backtest_dir / "residual_covariance.parquet")
+    assert {"matrix_rank", "covariance_method"}.issubset(covariance.columns)
     assert (report_dir / "model_card.md").exists()
     assert (
         (report_dir / "diagnostics.html").read_text(encoding="utf-8").startswith("<!doctype html>")
@@ -283,7 +293,7 @@ def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     assert race_catalog["office_type"].unique().to_list() == ["president"]
     assert (out_dir / "plots" / "electoral_college_distribution.png").stat().st_size > 0
     assert (out_dir / "plots" / "topline_electoral_swarm.png").stat().st_size > 0
-    assert payload["row_count"] == 2
+    assert payload["row_count"] == 6
     assert (
         ctx.artifacts_dir / "backtests" / "latest" / "component_admission_president_state.json"
     ).exists()
@@ -408,10 +418,38 @@ def test_fundamentals_ridge_fits_when_training_rows_meet_threshold(tmp_path: Pat
     model = FundamentalsModel(model_config).fit(bundle)
     estimates = model.run(bundle)
 
-    assert model.fit_status.startswith("ridge_fit")
+    assert model.fit_status.startswith("standardized_ridge_fit")
     assert model.training_rows >= 1
+    assert model.feature_stds
     assert not estimates.is_empty()
-    assert estimates["explanation"].str.contains("ridge_fit").all()
+    assert estimates["explanation"].str.contains("standardized_ridge_fit").all()
+
+
+def test_residual_covariance_requires_multiple_observations() -> None:
+    one_observation = pl.DataFrame(
+        {
+            "cycle": [2024, 2024],
+            "as_of": ["2024-11-04", "2024-11-04"],
+            "geography": ["WI", "WI"],
+            "predicted_vote_share": [0.51, 0.49],
+            "actual_vote_share": [0.495, 0.501],
+        }
+    )
+    assert BacktestRunner._residual_covariance(one_observation).is_empty()
+
+    two_observations = pl.DataFrame(
+        {
+            "cycle": [2024, 2024, 2024, 2024],
+            "as_of": ["2024-10-29", "2024-10-29", "2024-11-04", "2024-11-04"],
+            "geography": ["WI", "WI", "WI", "WI"],
+            "predicted_vote_share": [0.51, 0.49, 0.50, 0.50],
+            "actual_vote_share": [0.495, 0.501, 0.495, 0.501],
+        }
+    )
+    covariance = BacktestRunner._residual_covariance(two_observations)
+    assert covariance.height == 1
+    assert covariance["sample_size"].to_list() == [2]
+    assert covariance["covariance_method"].to_list() == ["structured_shrinkage_by_geography"]
 
 
 def test_score_predictions_handles_empty_and_real_rows(tmp_path: Path) -> None:

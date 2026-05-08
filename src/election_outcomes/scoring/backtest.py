@@ -13,6 +13,7 @@ from election_outcomes.features import (
     FeatureBuilder,
     FeatureBundle,
     filter_bundle_by_date,
+    filter_results_before_cycle,
     subset_bundle,
 )
 from election_outcomes.models import (
@@ -64,16 +65,17 @@ class BacktestRunner:
     ) -> BacktestArtifacts:
         bundle = FeatureBuilder(self.context).run()
         model_config = self.context.read_yaml("model.yaml")
+        backtest_config = self.context.read_yaml("backtests.yaml")
         scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
         rolling_predictions = self._rolling_origin_predictions(
             bundle=bundle,
             model_config=model_config,
+            backtest_config=backtest_config,
             scenario=scenario_obj,
             start_cycle=start_cycle,
             holdout_cycle=holdout_cycle,
         )
-        config = self.context.read_yaml("backtests.yaml")
-        minimum_rows = int(config.get("minimum_rows_for_trust", 30))
+        minimum_rows = int(backtest_config.get("minimum_rows_for_trust", 30))
         metrics = {
             component: score_predictions(rolling_predictions, column)
             for component, column in self.COMPONENT_COLUMNS.items()
@@ -110,13 +112,14 @@ class BacktestRunner:
             model_config=model_config,
             scenario=scenario_obj,
         )
-        covariance = self._residual_covariance(rolling_predictions)
+        covariance = self._residual_covariance(rolling_predictions, model_config)
         return BacktestArtifacts(payload, rolling_predictions, component_admission, covariance)
 
     def _rolling_origin_predictions(
         self,
         bundle: FeatureBundle,
         model_config: dict[str, Any],
+        backtest_config: dict[str, Any],
         scenario: Scenario | None,
         start_cycle: int | None,
         holdout_cycle: int | None,
@@ -141,18 +144,20 @@ class BacktestRunner:
             test_catalog = base_catalog.filter(pl.col("cycle") == target_cycle)
             if train_catalog.is_empty() or test_catalog.is_empty():
                 continue
-            as_of = self._cycle_as_of(test_catalog)
-            train_bundle = filter_bundle_by_date(subset_bundle(bundle, train_catalog), as_of)
-            test_bundle = filter_bundle_by_date(subset_bundle(bundle, test_catalog), as_of)
-            predictions = self._predict_cycle(
-                train_bundle=train_bundle,
-                test_bundle=test_bundle,
-                target_cycle=target_cycle,
-                as_of=as_of,
-                model_config=model_config,
-            )
-            if not predictions.is_empty():
-                frames.append(predictions)
+            offsets = self._as_of_offsets(backtest_config)
+            for offset_days, as_of in self._cycle_as_of_dates(test_catalog, offsets):
+                train_bundle = filter_bundle_by_date(subset_bundle(bundle, train_catalog), as_of)
+                test_bundle = filter_bundle_by_date(subset_bundle(bundle, test_catalog), as_of)
+                predictions = self._predict_cycle(
+                    train_bundle=train_bundle,
+                    test_bundle=test_bundle,
+                    target_cycle=target_cycle,
+                    as_of=as_of,
+                    as_of_offset_days=offset_days,
+                    model_config=model_config,
+                )
+                if not predictions.is_empty():
+                    frames.append(predictions)
         return pl.concat(frames, how="diagonal_relaxed") if frames else self._empty_predictions()
 
     def _predict_cycle(
@@ -161,11 +166,14 @@ class BacktestRunner:
         test_bundle: FeatureBundle,
         target_cycle: int,
         as_of: str,
+        as_of_offset_days: int,
         model_config: dict[str, Any],
     ) -> pl.DataFrame:
+        train_bundle = filter_results_before_cycle(train_bundle, target_cycle)
+        fundamentals_model = FundamentalsModel(model_config).fit(train_bundle)
         component_estimates = [
             PollingModel(model_config, as_of=as_of).run(test_bundle),
-            FundamentalsModel(model_config).fit(train_bundle).run(test_bundle),
+            fundamentals_model.run(test_bundle),
             MarketModel(model_config).run(test_bundle),
             PublicSignalModel(
                 trusted=bool(
@@ -173,6 +181,8 @@ class BacktestRunner:
                 )
             ).run(test_bundle),
         ]
+        if all(frame.is_empty() for frame in component_estimates):
+            return self._empty_predictions()
         ensemble = EnsembleModel(model_config).run(test_bundle, component_estimates)
         rows: list[dict[str, Any]] = []
         actuals = {
@@ -189,6 +199,7 @@ class BacktestRunner:
         ensemble_share = self._component_share(ensemble)
         ensemble_uncertainty = self._component_uncertainty(ensemble)
         catalog = {row["race_id"]: row for row in test_bundle.race_catalog.iter_rows(named=True)}
+        baseline_sigma = self._baseline_sigma(train_bundle, model_config)
         for option in test_bundle.options.iter_rows(named=True):
             key = (option["race_id"], option["option_id"])
             actual = actuals.get(key)
@@ -202,13 +213,15 @@ class BacktestRunner:
                 "race_id": option["race_id"],
                 "cycle": target_cycle,
                 "as_of": as_of,
+                "as_of_offset_days": as_of_offset_days,
                 "geography": race.get("geography"),
                 "office_type": race.get("office_type"),
                 "option_id": option["option_id"],
                 "party": option.get("party"),
                 "actual_winner": bool(actual["winner"]),
                 "actual_vote_share": float(actual["vote_share"]),
-                "baseline_probability": normal_cdf((previous_share - 0.5) / 0.08),
+                "baseline_probability": normal_cdf((previous_share - 0.5) / baseline_sigma),
+                "baseline_sigma": baseline_sigma,
                 "predicted_vote_share": predicted_share,
                 "lower_90": clamp(predicted_share - 1.645 * uncertainty, 0.0, 1.0),
                 "upper_90": clamp(predicted_share + 1.645 * uncertainty, 0.0, 1.0),
@@ -246,11 +259,46 @@ class BacktestRunner:
         }
 
     @staticmethod
-    def _cycle_as_of(test_catalog: pl.DataFrame) -> str:
+    def _as_of_offsets(backtest_config: dict[str, Any]) -> list[int]:
+        rolling = dict(backtest_config.get("rolling_origin", {}))
+        offsets = rolling.get("as_of_offsets_days", [1])
+        parsed = sorted({max(1, int(value)) for value in offsets}, reverse=True)
+        return parsed or [1]
+
+    @staticmethod
+    def _cycle_as_of_dates(
+        test_catalog: pl.DataFrame, offsets_days: list[int]
+    ) -> list[tuple[int, str]]:
         election_date = test_catalog.select(pl.col("election_date").min()).item()
         if not hasattr(election_date, "isoformat"):
             election_date = datetime.fromisoformat(str(election_date)).date()
-        return (election_date - timedelta(days=1)).isoformat()
+        return [
+            (offset_days, (election_date - timedelta(days=offset_days)).isoformat())
+            for offset_days in offsets_days
+        ]
+
+    @staticmethod
+    def _baseline_sigma(train_bundle: FeatureBundle, model_config: dict[str, Any]) -> float:
+        baseline = dict(model_config.get("baseline", {}))
+        default_sigma = float(baseline.get("previous_share_sigma", 0.08))
+        min_rows = int(baseline.get("empirical_min_rows", 20))
+        min_sigma = float(baseline.get("empirical_min_sigma", 0.03))
+        if train_bundle.results.is_empty() or train_bundle.options.is_empty():
+            return max(default_sigma, min_sigma)
+        joined = train_bundle.results.join(
+            train_bundle.options.select(["race_id", "option_id", "previous_vote_share"]),
+            on=["race_id", "option_id"],
+            how="inner",
+        ).with_columns(
+            (pl.col("vote_share") - pl.col("previous_vote_share").fill_null(0.5)).alias(
+                "baseline_residual"
+            )
+        )
+        values = joined.select("baseline_residual").drop_nulls()
+        if values.height < min_rows:
+            return max(default_sigma, min_sigma)
+        sigma = float(values["baseline_residual"].std() or default_sigma)
+        return max(sigma, min_sigma)
 
     @staticmethod
     def _rolling_origin_summary(frame: pl.DataFrame) -> dict[str, Any]:
@@ -305,6 +353,7 @@ class BacktestRunner:
             "scenario": scenario.name if scenario else None,
             "scenario_family": scenario.family if scenario else None,
             "admission_status": "trusted" if trustworthy else "experimental_insufficient_rows",
+            "engine_using": "learned_admission" if trustworthy else "config_defaults",
             "trusted_components": trusted_components,
             "component_weights": dict(model_config.get("component_weights", {})),
             "ablations": ablations,
@@ -313,40 +362,65 @@ class BacktestRunner:
         }
 
     @staticmethod
-    def _residual_covariance(frame: pl.DataFrame) -> pl.DataFrame:
+    def _residual_covariance(
+        frame: pl.DataFrame, model_config: dict[str, Any] | None = None
+    ) -> pl.DataFrame:
+        schema = {
+            "row_group": pl.Utf8,
+            "column_group": pl.Utf8,
+            "covariance": pl.Float64,
+            "correlation": pl.Float64,
+            "sample_size": pl.Int64,
+            "shrinkage": pl.Float64,
+            "matrix_rank": pl.Int64,
+            "covariance_method": pl.Utf8,
+        }
         if frame.is_empty():
-            return pl.DataFrame(
-                schema={
-                    "row_group": pl.Utf8,
-                    "column_group": pl.Utf8,
-                    "covariance": pl.Float64,
-                    "correlation": pl.Float64,
-                    "sample_size": pl.Int64,
-                    "shrinkage": pl.Float64,
-                }
-            )
+            return pl.DataFrame(schema=schema)
+        correlation_config = dict((model_config or {}).get("correlation", {}))
+        geographic_groups = {
+            str(key): str(value)
+            for key, value in dict(correlation_config.get("geographic_groups", {})).items()
+        }
+        shrinkage = float(correlation_config.get("residual_covariance_shrinkage", 0.60))
+        min_variance = float(correlation_config.get("residual_min_variance", 0.0004))
+        same_region_corr = float(correlation_config.get("residual_same_region_correlation", 0.35))
+        cross_region_corr = float(correlation_config.get("residual_cross_region_correlation", 0.12))
+        index_columns = ["cycle"]
+        if "as_of" in frame.columns:
+            index_columns.append("as_of")
         residuals = (
             frame.with_columns(
                 (pl.col("predicted_vote_share") - pl.col("actual_vote_share")).alias("residual")
             )
-            .group_by(["cycle", "geography"])
+            .group_by([*index_columns, "geography"])
             .agg(pl.col("residual").mean().alias("residual"))
         )
         pivot = residuals.pivot(
-            index="cycle", on="geography", values="residual", aggregate_function="mean"
+            index=index_columns,
+            on="geography",
+            values="residual",
+            aggregate_function="mean",
         )
-        groups = [column for column in pivot.columns if column != "cycle"]
-        if not groups:
-            return BacktestRunner._residual_covariance(pl.DataFrame())
+        groups = [column for column in pivot.columns if column not in set(index_columns)]
+        if not groups or pivot.height < 2:
+            return pl.DataFrame(schema=schema)
         matrix_rows = []
         data = pivot.select(groups).fill_null(0.0).to_numpy().astype(np.float64)
-        if data.shape[0] > 1:
-            covariance = np.cov(data, rowvar=False)
-            covariance = np.atleast_2d(covariance)
-        else:
-            covariance = np.diag(np.maximum(data[0] ** 2, 0.0004))
-        shrinkage = 0.25
-        covariance = (1.0 - shrinkage) * covariance + shrinkage * np.diag(np.diag(covariance))
+        covariance = np.atleast_2d(np.cov(data, rowvar=False))
+        diagonal_variance = np.maximum(np.diag(covariance), min_variance)
+        empirical = covariance.copy()
+        np.fill_diagonal(empirical, diagonal_variance)
+        target = BacktestRunner._structured_covariance_target(
+            groups,
+            diagonal_variance,
+            geographic_groups,
+            same_region_corr,
+            cross_region_corr,
+        )
+        covariance = (1.0 - shrinkage) * empirical + shrinkage * target
+        covariance = BacktestRunner._nearest_psd(covariance, min_variance=min_variance * 0.01)
+        matrix_rank = int(np.linalg.matrix_rank(covariance))
         diagonal = np.sqrt(np.maximum(np.diag(covariance), 1e-12))
         for row_index, row_group in enumerate(groups):
             for column_index, column_group in enumerate(groups):
@@ -360,9 +434,47 @@ class BacktestRunner:
                         "correlation": float(correlation),
                         "sample_size": int(data.shape[0]),
                         "shrinkage": shrinkage,
+                        "matrix_rank": matrix_rank,
+                        "covariance_method": "structured_shrinkage_by_geography",
                     }
                 )
         return pl.DataFrame(matrix_rows)
+
+    @staticmethod
+    def _structured_covariance_target(
+        groups: list[str],
+        diagonal_variance: np.ndarray,
+        geographic_groups: dict[str, str],
+        same_region_corr: float,
+        cross_region_corr: float,
+    ) -> np.ndarray:
+        target = np.zeros((len(groups), len(groups)), dtype=np.float64)
+        for row_index, row_group in enumerate(groups):
+            row_region = geographic_groups.get(str(row_group).split("-")[0], str(row_group))
+            for column_index, column_group in enumerate(groups):
+                column_region = geographic_groups.get(
+                    str(column_group).split("-")[0], str(column_group)
+                )
+                if row_index == column_index:
+                    corr = 1.0
+                elif row_region == column_region:
+                    corr = same_region_corr
+                else:
+                    corr = cross_region_corr
+                target[row_index, column_index] = (
+                    corr
+                    * float(np.sqrt(diagonal_variance[row_index]))
+                    * float(np.sqrt(diagonal_variance[column_index]))
+                )
+        return target
+
+    @staticmethod
+    def _nearest_psd(matrix: np.ndarray, min_variance: float) -> np.ndarray:
+        symmetric = (matrix + matrix.T) / 2.0
+        eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+        clipped = np.maximum(eigenvalues, min_variance)
+        psd = (eigenvectors * clipped) @ eigenvectors.T
+        return (psd + psd.T) / 2.0
 
     @staticmethod
     def _empty_predictions() -> pl.DataFrame:
@@ -371,6 +483,7 @@ class BacktestRunner:
                 "race_id": pl.Utf8,
                 "cycle": pl.Int64,
                 "as_of": pl.Utf8,
+                "as_of_offset_days": pl.Int64,
                 "geography": pl.Utf8,
                 "office_type": pl.Utf8,
                 "option_id": pl.Utf8,
@@ -378,6 +491,7 @@ class BacktestRunner:
                 "actual_winner": pl.Boolean,
                 "actual_vote_share": pl.Float64,
                 "baseline_probability": pl.Float64,
+                "baseline_sigma": pl.Float64,
                 "polls_probability": pl.Float64,
                 "fundamentals_probability": pl.Float64,
                 "markets_probability": pl.Float64,

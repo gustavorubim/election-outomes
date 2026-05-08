@@ -17,6 +17,10 @@ component_weights:
   fundamentals: 0.30
   markets: 0.20
   public_signals: 0.05
+baseline:
+  previous_share_sigma: 0.08
+  empirical_min_rows: 20
+  empirical_min_sigma: 0.03
 polling:
   half_life_days: 21
   min_nonsampling_error: 0.035
@@ -29,6 +33,10 @@ correlation:
   national_sigma: 0.015
   region_sigma: 0.010
   office_sigma: 0.008
+  residual_covariance_shrinkage: 0.60
+  residual_min_variance: 0.0004
+  residual_same_region_correlation: 0.35
+  residual_cross_region_correlation: 0.12
   geographic_groups:
     # Census Bureau 4-region map. Unmapped geographies fall into their own per-state group.
     CT: northeast
