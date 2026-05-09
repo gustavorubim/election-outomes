@@ -286,3 +286,161 @@ scenarios:
     election_date: "2024-11-05"
     default_as_of: "2024-11-04"
     electoral_votes: *ev_2024
+
+  # ---------------- Senate state-level scenarios ----------------
+  senate_state:
+    description: U.S. Senate state-level races (Classes I/II/III rotating).
+    office_type: senate
+    geography_type: state
+    control_body: senate
+  senate_2014_state:
+    description: 2014 U.S. Senate state-level forecast and actuals comparison.
+    family: senate_state
+    cycle: 2014
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2014-11-04"
+    default_as_of: "2014-11-03"
+    senate_class: II
+    holdovers:
+      DEM: 30
+      REP: 30
+      IND: 2
+  senate_2016_state:
+    description: 2016 U.S. Senate state-level forecast and actuals comparison.
+    family: senate_state
+    cycle: 2016
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2016-11-08"
+    default_as_of: "2016-11-07"
+    senate_class: III
+    holdovers:
+      DEM: 36
+      REP: 28
+      IND: 2
+  senate_2018_state:
+    description: 2018 U.S. Senate state-level forecast and actuals comparison.
+    family: senate_state
+    cycle: 2018
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2018-11-06"
+    default_as_of: "2018-11-05"
+    senate_class: I
+    holdovers:
+      DEM: 23
+      REP: 42
+      IND: 2
+  senate_2020_state:
+    description: 2020 U.S. Senate state-level forecast and actuals comparison.
+    family: senate_state
+    cycle: 2020
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2020-11-03"
+    default_as_of: "2020-11-02"
+    senate_class: II
+    holdovers:
+      DEM: 35
+      REP: 30
+      IND: 2
+  senate_2022_state:
+    description: 2022 U.S. Senate state-level forecast and actuals comparison.
+    family: senate_state
+    cycle: 2022
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2022-11-08"
+    default_as_of: "2022-11-07"
+    senate_class: III
+    holdovers:
+      DEM: 36
+      REP: 29
+      IND: 2
+  senate_2024_state:
+    description: 2024 U.S. Senate state-level forecast and actuals comparison.
+    family: senate_state
+    cycle: 2024
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2024-11-05"
+    default_as_of: "2024-11-04"
+    senate_class: I
+    holdovers:
+      DEM: 28
+      REP: 38
+      IND: 1
+
+  # ---------------- House district-level scenarios ----------------
+  house_district:
+    description: U.S. House district-level races (435 seats every 2 years).
+    office_type: house
+    geography_type: district
+    control_body: house
+  house_2014_district:
+    description: 2014 U.S. House district-level forecast and actuals comparison.
+    family: house_district
+    cycle: 2014
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2014-11-04"
+    default_as_of: "2014-11-03"
+    redistricting_era: "2012_2020"
+  house_2016_district:
+    description: 2016 U.S. House district-level forecast and actuals comparison.
+    family: house_district
+    cycle: 2016
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2016-11-08"
+    default_as_of: "2016-11-07"
+    redistricting_era: "2012_2020"
+  house_2018_district:
+    description: 2018 U.S. House district-level forecast and actuals comparison.
+    family: house_district
+    cycle: 2018
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2018-11-06"
+    default_as_of: "2018-11-05"
+    redistricting_era: "2012_2020"
+  house_2020_district:
+    description: 2020 U.S. House district-level forecast and actuals comparison.
+    family: house_district
+    cycle: 2020
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2020-11-03"
+    default_as_of: "2020-11-02"
+    redistricting_era: "2012_2020"
+  house_2022_district:
+    description: 2022 U.S. House district-level forecast and actuals comparison.
+    family: house_district
+    cycle: 2022
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2022-11-08"
+    default_as_of: "2022-11-07"
+    redistricting_era: "2022_plus"
+  house_2024_district:
+    description: 2024 U.S. House district-level forecast and actuals comparison.
+    family: house_district
+    cycle: 2024
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2024-11-05"
+    default_as_of: "2024-11-04"
+    redistricting_era: "2022_plus"

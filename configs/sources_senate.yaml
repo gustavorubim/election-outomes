@@ -1,0 +1,74 @@
+parser_arg_anchors:
+  senate_panel_cycles: &senate_panel_cycles [2014, 2016, 2018, 2020, 2022, 2024]
+  senate_as_of_offsets: &senate_as_of_offsets [90, 60, 31, 30, 7, 1]
+
+sources:
+  - id: senate_state_panel_races
+    table: races
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-races-v1
+    license: Synthetic Senate state panel; see scripts/generate_senate_panel.py.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *senate_panel_cycles
+  - id: senate_state_panel_options
+    table: options
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-options-v1
+    license: Synthetic Senate state panel; see scripts/generate_senate_panel.py.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *senate_panel_cycles
+  - id: senate_state_panel_fundamentals
+    table: fundamentals
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-fundamentals-v1
+    license: Synthetic Senate state panel; see scripts/generate_senate_panel.py.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *senate_panel_cycles
+      as_of_offsets_days: *senate_as_of_offsets
+  - id: senate_state_panel_polls
+    table: polls
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-polls-v1
+    license: Synthetic Senate state panel; see scripts/generate_senate_panel.py.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *senate_panel_cycles
+      as_of_offsets_days: *senate_as_of_offsets
+      sample_size: 850
+  - id: senate_state_panel_results
+    table: results
+    type: fixture
+    path: fixtures/senate_state_panel.csv
+    parser_version: senate-state-panel-results-v1
+    license: Synthetic Senate state panel; see scripts/generate_senate_panel.py.
+    url: file://fixtures/senate_state_panel.csv
+    parser_args:
+      cycles: *senate_panel_cycles
+  - id: fixture_market_quotes
+    table: market_quotes
+    type: fixture
+    path: fixtures/market_quotes.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for local validation.
+    url: file://fixtures/market_quotes.csv
+  - id: fixture_public_signals
+    table: public_signals
+    type: fixture
+    path: fixtures/public_signals.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for local validation.
+    url: file://fixtures/public_signals.csv
+  - id: fixture_backtest_predictions
+    table: backtest_predictions
+    type: fixture
+    path: fixtures/backtest_predictions.csv
+    parser_version: fixture-v1
+    license: Synthetic public-data-style fixture for local validation.
+    url: file://fixtures/backtest_predictions.csv

@@ -605,6 +605,186 @@ def test_president_state_panel_parsers_derive_curated_tables(tmp_path: Path) -> 
     ]
 
 
+def test_senate_and_house_panel_parsers_derive_curated_tables(tmp_path: Path) -> None:
+    senate_path = tmp_path / "senate_panel.csv"
+    senate_path.write_text(
+        "\n".join(
+            [
+                (
+                    "cycle,state,election_date,dem_name,rep_name,dem_incumbent,rep_incumbent,"
+                    "dem_previous_vote_share,rep_previous_vote_share,dem_fundraising_usd,"
+                    "rep_fundraising_usd,dem_vote_share,rep_vote_share,turnout,"
+                    "partisan_lean,incumbency_advantage,economic_index,"
+                    "demographic_turnout_index,historical_turnout_rate,registered_voters,"
+                    "pollster,poll_sample_size,poll_population,poll_sponsor_class,"
+                    "poll_methodology,dem_poll_pct,rep_poll_pct"
+                ),
+                (
+                    "2024,AZ,2024-11-05,Dem Senate,Rep Senate,false,true,0.49,0.51,"
+                    "9000000,8000000,0.505,0.495,3200000,-1.2,3.5,-0.1,0.4,0.63,"
+                    "5200000,Panel Poll,850,lv,nonpartisan,mixed,50.4,49.6"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    house_path = tmp_path / "house_panel.csv"
+    house_path.write_text(
+        "\n".join(
+            [
+                (
+                    "cycle,state,district,election_date,competitive,dem_name,rep_name,"
+                    "dem_incumbent,rep_incumbent,dem_previous_vote_share,"
+                    "rep_previous_vote_share,dem_fundraising_usd,rep_fundraising_usd,"
+                    "dem_vote_share,rep_vote_share,turnout,partisan_lean,"
+                    "incumbency_advantage,economic_index,demographic_turnout_index,"
+                    "historical_turnout_rate,registered_voters,pollster,poll_sample_size,"
+                    "poll_population,poll_sponsor_class,poll_methodology,dem_poll_pct,"
+                    "rep_poll_pct"
+                ),
+                (
+                    "2024,CA,CA-45,2024-11-05,true,Dem House,Rep House,false,true,"
+                    "0.48,0.52,4500000,4700000,0.51,0.49,410000,1.0,4.0,-0.1,"
+                    "0.2,0.55,760000,House Panel Poll,700,lv,nonpartisan,online,50.8,49.2"
+                ),
+                (
+                    "2024,CA,CA-12,2024-11-05,false,Safe Dem,Safe Rep,true,false,"
+                    "0.70,0.30,900000,200000,0.72,0.28,390000,22.0,4.0,-0.1,"
+                    "0.3,0.55,740000,House Panel Poll,700,lv,nonpartisan,online,70.0,30.0"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    parser_sources = [
+        ("senate_races", "races", "senate-state-panel-races-v1", senate_path, {}),
+        ("senate_options", "options", "senate-state-panel-options-v1", senate_path, {}),
+        ("senate_results", "results", "senate-state-panel-results-v1", senate_path, {}),
+        (
+            "senate_fundamentals",
+            "fundamentals",
+            "senate-state-panel-fundamentals-v1",
+            senate_path,
+            {"as_of_offsets_days": [30, 7]},
+        ),
+        (
+            "senate_polls",
+            "polls",
+            "senate-state-panel-polls-v1",
+            senate_path,
+            {"as_of_offsets_days": [30, 7], "poll_duration_days": 2},
+        ),
+        ("house_races", "races", "house-district-panel-races-v1", house_path, {}),
+        ("house_options", "options", "house-district-panel-options-v1", house_path, {}),
+        ("house_results", "results", "house-district-panel-results-v1", house_path, {}),
+        (
+            "house_fundamentals",
+            "fundamentals",
+            "house-district-panel-fundamentals-v1",
+            house_path,
+            {"as_of_offsets_days": [30, 7]},
+        ),
+        (
+            "house_polls",
+            "polls",
+            "house-district-panel-polls-v1",
+            house_path,
+            {"as_of_offsets_days": [30, 7], "poll_duration_days": 2},
+        ),
+    ]
+    sources = [
+        SourceDefinition(
+            id=source_id,
+            table=table,
+            type="fixture",
+            path=path,
+            parser_version=parser_version,
+            license="Synthetic congressional panel parser fixture.",
+            url=path.resolve().as_uri(),
+            parser_args=parser_args,
+        )
+        for source_id, table, parser_version, path, parser_args in parser_sources
+    ]
+    ctx = context(tmp_path)
+    sync_result = SyncRunner(ctx, registry=SourceRegistry(sources)).run()
+    result = CuratedDataBuilder(ctx).run()
+
+    assert sync_result.failed_sources == 0
+    races = result.tables["races"]
+    actual_races = sorted(
+        races.select(["race_id", "office_type", "control_body", "seats"]).to_dicts(),
+        key=lambda row: row["race_id"],
+    )
+    assert actual_races == sorted(
+        [
+            {
+                "race_id": "US-SEN-AZ-2024",
+                "office_type": "senate",
+                "control_body": "senate",
+                "seats": 1,
+            },
+            {
+                "race_id": "US-HOUSE-CA-45-2024",
+                "office_type": "house",
+                "control_body": "house",
+                "seats": 1,
+            },
+            {
+                "race_id": "US-HOUSE-CA-12-2024",
+                "office_type": "house",
+                "control_body": "house",
+                "seats": 1,
+            },
+        ],
+        key=lambda row: row["race_id"],
+    )
+
+    options = result.tables["options"]
+    assert options.filter(pl.col("race_id") == "US-SEN-AZ-2024").select(
+        ["option_id", "party", "incumbent", "previous_vote_share"]
+    ).to_dicts() == [
+        {
+            "option_id": "US-SEN-AZ-2024-D",
+            "party": "DEM",
+            "incumbent": False,
+            "previous_vote_share": 0.49,
+        },
+        {
+            "option_id": "US-SEN-AZ-2024-R",
+            "party": "REP",
+            "incumbent": True,
+            "previous_vote_share": 0.51,
+        },
+    ]
+
+    results = result.tables["results"]
+    actual_winners = sorted(
+        results.filter(pl.col("winner")).select(["race_id", "party"]).to_dicts(),
+        key=lambda row: row["race_id"],
+    )
+    assert actual_winners == sorted(
+        [
+            {"race_id": "US-SEN-AZ-2024", "party": "DEM"},
+            {"race_id": "US-HOUSE-CA-45-2024", "party": "DEM"},
+            {"race_id": "US-HOUSE-CA-12-2024", "party": "DEM"},
+        ],
+        key=lambda row: row["race_id"],
+    )
+
+    fundamentals = result.tables["fundamentals"]
+    assert fundamentals.filter(pl.col("race_id") == "US-SEN-AZ-2024").height == 2
+    assert fundamentals.filter(pl.col("race_id") == "US-HOUSE-CA-45-2024").height == 2
+
+    polls = result.tables["polls"]
+    assert polls.filter(pl.col("race_id") == "US-SEN-AZ-2024").height == 4
+    assert polls.filter(pl.col("race_id") == "US-HOUSE-CA-45-2024").height == 4
+    assert polls.filter(pl.col("race_id") == "US-HOUSE-CA-12-2024").is_empty()
+    assert set(polls.select("methodology").unique().to_series().to_list()) == {
+        "online",
+        "mixed",
+    }
+
+
 def test_president_state_panel_parser_requires_declared_columns(tmp_path: Path) -> None:
     source_path = tmp_path / "bad_president_panel.csv"
     source_path.write_text(

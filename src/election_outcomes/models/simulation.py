@@ -25,10 +25,16 @@ class SimulationOutputs:
 
 class SimulationEngine:
     def __init__(
-        self, config: dict[str, object], residual_covariance: pl.DataFrame | None = None
+        self,
+        config: dict[str, object],
+        residual_covariance: pl.DataFrame | None = None,
+        holdovers: dict[str, int] | None = None,
     ) -> None:
         self.config = config
         self.residual_covariance = residual_covariance
+        self.holdovers: dict[str, int] = {
+            str(key).upper(): int(value) for key, value in (holdovers or {}).items()
+        }
         self.seed = int(config.get("seed", 20260508))
         self.draw_count = int(config.get("simulation_count", 1000))
         uncertainty = dict(config.get("uncertainty", {}))
@@ -477,9 +483,13 @@ class SimulationEngine:
                 row["draw_id"]: float(row["seat_count"])
                 for row in counts_by_draw.iter_rows(named=True)
             }
-            counts = np.array([count_map.get(draw_id, 0.0) for draw_id in range(self.draw_count)])
+            modeled_counts = np.array(
+                [count_map.get(draw_id, 0.0) for draw_id in range(self.draw_count)]
+            )
             modeled_seats = self._modeled_seats(joined, str(control_body))
             threshold = self._control_threshold(str(control_body), modeled_seats)
+            holdover_seats = int(self.holdovers.get(str(party).upper(), 0))
+            counts = modeled_counts + holdover_seats
             tipping = self._pivotal_races(
                 joined=joined,
                 counts=counts,
@@ -487,20 +497,25 @@ class SimulationEngine:
                 party=str(party),
                 threshold=threshold,
             )
+            seats_to_majority = max(threshold - int(np.mean(counts)), 0)
             rows.append(
                 {
                     "control_body": control_body,
                     "party": party,
                     "control_threshold": threshold,
                     "modeled_seats": modeled_seats,
+                    "holdover_seats": holdover_seats,
                     "control_scope": "configured_threshold"
                     if str(control_body) in self.control_thresholds
                     else "modeled_races_majority",
                     "seat_count_mean": float(np.mean(counts)),
+                    "seat_count_modeled_mean": float(np.mean(modeled_counts)),
                     "seat_count_p10": float(np.quantile(counts, 0.10)),
                     "seat_count_p50": float(np.quantile(counts, 0.50)),
                     "seat_count_p90": float(np.quantile(counts, 0.90)),
+                    "majority_probability": float(np.mean(counts >= threshold)),
                     "control_probability": float(np.mean(counts >= threshold)),
+                    "seats_to_majority_mean": seats_to_majority,
                     "tipping_point_races": json.dumps(
                         [item["race_id"] for item in tipping[:3]], sort_keys=True
                     ),

@@ -31,6 +31,25 @@ class Scenario:
     def storage_key(self) -> str:
         return self.family if self.name.endswith("_state") and self.cycle is not None else self.name
 
+    @property
+    def control_body(self) -> str | None:
+        value = self.payload.get("control_body")
+        return str(value) if value else None
+
+    @property
+    def holdovers(self) -> dict[str, int]:
+        raw = self.payload.get("holdovers")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, int] = {}
+        for key, value in raw.items():
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            result[str(key).upper()] = count
+        return result
+
     def filter_catalog(self, catalog: pl.DataFrame, include_cycle: bool = True) -> pl.DataFrame:
         frame = catalog
         for column in ("office_type", "geography_type", "control_body"):

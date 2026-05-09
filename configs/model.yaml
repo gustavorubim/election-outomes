@@ -93,8 +93,8 @@ correlation:
     WA: west
 control_thresholds:
   president: 270
-  senate: 1
-  house: 1
+  senate: 51
+  house: 218
   local: 1
 market_adjustments:
   min_open_interest: 1000

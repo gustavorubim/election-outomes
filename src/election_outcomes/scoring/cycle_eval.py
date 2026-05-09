@@ -49,6 +49,8 @@ class CycleEvaluationReport:
                 "cycle": pl.Int64,
                 "as_of": pl.Utf8,
                 "forecast_run_id": pl.Utf8,
+                "control_body": pl.Utf8,
+                "majority_threshold": pl.Int64,
                 "forecast_ec_winner_party": pl.Utf8,
                 "actual_ec_winner_party": pl.Utf8,
                 "state_topline_ec_winner_party": pl.Utf8,
@@ -57,6 +59,10 @@ class CycleEvaluationReport:
                 "forecast_ec_p10": pl.Float64,
                 "forecast_ec_p50": pl.Float64,
                 "forecast_ec_p90": pl.Float64,
+                "dem_seat_count_mean": pl.Float64,
+                "rep_seat_count_mean": pl.Float64,
+                "dem_majority_probability": pl.Float64,
+                "rep_majority_probability": pl.Float64,
                 "ec_winner_accuracy": pl.Float64,
                 "state_accuracy": pl.Float64,
                 "state_accuracy_n": pl.Int64,
@@ -180,25 +186,38 @@ class CycleEvaluationReport:
                 "mean_brier_score": None,
                 "mean_vote_share_mae": None,
                 "ec_winner_accuracy": None,
+                "majority_winner_accuracy": None,
                 "total_upsets": 0,
             }
+        def safe_mean(column: str) -> float | None:
+            if column not in frame.columns:
+                return None
+            non_null = frame[column].drop_nulls()
+            if non_null.len() == 0:
+                return None
+            return float(non_null.mean())
+
         return {
-            "mean_state_accuracy": float(frame["state_accuracy"].mean()),
-            "mean_brier_score": float(frame["brier_score"].mean()),
-            "mean_vote_share_mae": float(frame["mean_absolute_vote_share_error"].mean()),
-            "ec_winner_accuracy": float(frame["ec_winner_accuracy"].mean()),
-            "total_upsets": int(frame["upset_count"].sum()),
+            "mean_state_accuracy": safe_mean("state_accuracy"),
+            "mean_brier_score": safe_mean("brier_score"),
+            "mean_vote_share_mae": safe_mean("mean_absolute_vote_share_error"),
+            "ec_winner_accuracy": safe_mean("ec_winner_accuracy"),
+            "majority_winner_accuracy": safe_mean("ec_winner_accuracy"),
+            "total_upsets": int(frame["upset_count"].fill_null(0).sum())
+            if "upset_count" in frame.columns else 0,
         }
 
     def _html_report(self, payload: dict[str, Any], frame: pl.DataFrame) -> str:
         aggregate = payload["aggregate"]
+        chamber_label = self._chamber_label(frame)
+        threshold_label = self._threshold_label(frame)
         cards = [
-            ("Cycles", payload["cycle_count"]),
-            ("EC Accuracy", self._pct(aggregate["ec_winner_accuracy"])),
-            ("Mean State Accuracy", self._pct(aggregate["mean_state_accuracy"])),
+            ("Cycles evaluated", payload["cycle_count"]),
+            (f"{chamber_label} majority threshold", threshold_label),
+            ("Majority winner accuracy", self._pct(aggregate.get("majority_winner_accuracy"))),
+            ("Mean state/seat accuracy", self._pct(aggregate["mean_state_accuracy"])),
             ("Mean Brier", self._num(aggregate["mean_brier_score"], 4)),
-            ("Mean Vote-Share MAE", self._pct(aggregate["mean_vote_share_mae"])),
-            ("Total Upsets", aggregate["total_upsets"]),
+            ("Total upsets", aggregate["total_upsets"]),
         ]
         card_html = "".join(
             "<div class='card'>"
@@ -222,21 +241,31 @@ class CycleEvaluationReport:
 <body>
   <header>
     <p class="eyebrow">Historical benchmark</p>
-    <h1>Presidential Cycle Evaluation</h1>
+    <h1>{html.escape(chamber_label)} Cycle Evaluation</h1>
     <p class="subtitle">
       Same-date forecasts as of {html.escape(str(payload["as_of_mm_dd"]))}, compared
-      against actual state and Electoral College outcomes.
+      against actual outcomes. Majority is reached at
+      <strong>{html.escape(str(threshold_label))}</strong> seats/votes.
     </p>
   </header>
   <section class="cards">{card_html}</section>
   <section class="plots">{plot_html}</section>
   <section class="panel">
-    <h2>Cycle Results</h2>
+    <h2>Cycle Results — Majority Story</h2>
     <table>
       <thead>
         <tr>
-          <th>Cycle</th><th>EC forecast</th><th>EV p10/p50/p90</th><th>State acc</th>
-          <th>Brier</th><th>MAE</th><th>Missed states</th><th>Links</th>
+          <th>Cycle</th>
+          <th>Forecast majority</th>
+          <th>DEM seats (mean)</th>
+          <th>REP seats (mean)</th>
+          <th>D maj prob</th>
+          <th>R maj prob</th>
+          <th>Seat p10/p50/p90</th>
+          <th>Race acc</th>
+          <th>Brier</th>
+          <th>Missed</th>
+          <th>Links</th>
         </tr>
       </thead>
       <tbody>{row_html}</tbody>
@@ -250,16 +279,20 @@ class CycleEvaluationReport:
     def _row_html(cls, row: dict[str, Any]) -> str:
         diagnostics = html.escape(str(row["diagnostics_path"]))
         comparison = html.escape(str(row["comparison_path"]))
+        forecast_party = html.escape(str(row.get("forecast_ec_winner_party") or "?"))
         return (
             "<tr>"
             f"<td>{row['cycle']}</td>"
-            f"<td>{html.escape(str(row['forecast_ec_winner_party']))} "
+            f"<td>{forecast_party} "
             f"({cls._pct(row['forecast_ec_win_probability'])})</td>"
+            f"<td>{cls._num(row.get('dem_seat_count_mean'), 1)}</td>"
+            f"<td>{cls._num(row.get('rep_seat_count_mean'), 1)}</td>"
+            f"<td>{cls._pct(row.get('dem_majority_probability'))}</td>"
+            f"<td>{cls._pct(row.get('rep_majority_probability'))}</td>"
             f"<td>{cls._num(row['forecast_ec_p10'], 0)} / {cls._num(row['forecast_ec_p50'], 0)} / "
             f"{cls._num(row['forecast_ec_p90'], 0)}</td>"
             f"<td>{cls._pct(row['state_accuracy'])}</td>"
             f"<td>{cls._num(row['brier_score'], 4)}</td>"
-            f"<td>{cls._pct(row['mean_absolute_vote_share_error'])}</td>"
             f"<td>{html.escape(str(row['missed_states'] or '-'))}</td>"
             f"<td><a href='{diagnostics}'>diagnostics</a> | "
             f"<a href='{comparison}'>comparison</a></td>"
@@ -268,14 +301,17 @@ class CycleEvaluationReport:
 
     def _narrative(self, payload: dict[str, Any], frame: pl.DataFrame) -> str:
         aggregate = payload["aggregate"]
+        chamber_label = self._chamber_label(frame)
+        threshold_label = self._threshold_label(frame)
         lines = [
-            "# Cycle Evaluation Narrative",
+            f"# {chamber_label} Cycle Evaluation Narrative",
             "",
             f"- Run id: `{payload['run_id']}`",
             f"- Same-date cut: `{payload['as_of_mm_dd']}`",
             f"- Cycles evaluated: `{payload['cycle_count']}`",
-            f"- Electoral College winner accuracy: `{self._pct(aggregate['ec_winner_accuracy'])}`",
-            f"- Mean state accuracy: `{self._pct(aggregate['mean_state_accuracy'])}`",
+            f"- Majority threshold: `{threshold_label}`",
+            f"- Majority winner accuracy: `{self._pct(aggregate.get('majority_winner_accuracy'))}`",
+            f"- Mean state/seat accuracy: `{self._pct(aggregate['mean_state_accuracy'])}`",
             f"- Mean Brier score: `{self._num(aggregate['mean_brier_score'], 4)}`",
             f"- Mean vote-share MAE: `{self._pct(aggregate['mean_vote_share_mae'])}`",
             f"- Total actual-winner upsets: `{aggregate['total_upsets']}`",
@@ -284,14 +320,53 @@ class CycleEvaluationReport:
             "",
         ]
         for row in frame.sort("cycle").to_dicts():
+            d_seats = self._num(row.get("dem_seat_count_mean"), 1)
+            r_seats = self._num(row.get("rep_seat_count_mean"), 1)
+            d_prob = self._pct(row.get("dem_majority_probability"))
+            r_prob = self._pct(row.get("rep_majority_probability"))
             lines.append(
-                "- "
-                f"{row['cycle']}: {row['forecast_ec_winner_party']} "
-                f"EC win probability {self._pct(row['forecast_ec_win_probability'])}; "
-                f"state accuracy {self._pct(row['state_accuracy'])}; "
-                f"missed states {row['missed_states'] or '-'}."
+                f"- **{row['cycle']}**: forecast majority "
+                f"{row.get('forecast_ec_winner_party') or '?'} "
+                f"({self._pct(row['forecast_ec_win_probability'])}). "
+                f"DEM mean seats {d_seats} (maj {d_prob}); "
+                f"REP mean seats {r_seats} (maj {r_prob}); "
+                f"race accuracy {self._pct(row['state_accuracy'])}; "
+                f"missed: {row['missed_states'] or '-'}."
             )
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _chamber_label(frame: pl.DataFrame) -> str:
+        if frame.is_empty() or "control_body" not in frame.columns:
+            return "Cycle"
+        bodies = [
+            value
+            for value in frame["control_body"].drop_nulls().unique().to_list()
+            if value
+        ]
+        if not bodies:
+            return "Cycle"
+        body = str(bodies[0])
+        return {
+            "president": "Electoral College (Presidential)",
+            "senate": "U.S. Senate",
+            "house": "U.S. House",
+        }.get(body, body.title())
+
+    @staticmethod
+    def _threshold_label(frame: pl.DataFrame) -> str:
+        if frame.is_empty() or "majority_threshold" not in frame.columns:
+            return "n/a"
+        thresholds = [
+            int(value)
+            for value in frame["majority_threshold"].drop_nulls().unique().to_list()
+            if value is not None
+        ]
+        if not thresholds:
+            return "n/a"
+        if len(thresholds) == 1:
+            return str(thresholds[0])
+        return ", ".join(str(value) for value in sorted(thresholds))
 
     @staticmethod
     def _pct(value: Any) -> str:

@@ -240,11 +240,18 @@ def results_cycle_eval(
         reuse_existing=reuse_existing,
     )
     aggregate = payload["aggregate"]
+
+    def _fmt(value: object, digits: int) -> str:
+        if value is None:
+            return "n/a"
+        return f"{float(value):.{digits}f}"
+
     console.print(
         "[green]Cycle evaluation complete[/green]: "
         f"{payload['cycle_count']} cycles, "
-        f"mean state accuracy={aggregate['mean_state_accuracy']:.3f}, "
-        f"mean Brier={aggregate['mean_brier_score']:.4f}"
+        f"mean state accuracy={_fmt(aggregate['mean_state_accuracy'], 3)}, "
+        f"mean Brier={_fmt(aggregate['mean_brier_score'], 4)}, "
+        f"majority winner accuracy={_fmt(aggregate.get('majority_winner_accuracy'), 3)}"
     )
     console.print(payload["output_dir"])
 

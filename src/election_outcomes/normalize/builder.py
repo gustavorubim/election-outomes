@@ -110,6 +110,20 @@ class CuratedDataBuilder:
         "dem_poll_pct",
         "rep_poll_pct",
     }
+    SENATE_STATE_PANEL_TABLES: ClassVar[dict[str, str]] = {
+        "senate-state-panel-races-v1": "races",
+        "senate-state-panel-options-v1": "options",
+        "senate-state-panel-results-v1": "results",
+        "senate-state-panel-fundamentals-v1": "fundamentals",
+        "senate-state-panel-polls-v1": "polls",
+    }
+    HOUSE_DISTRICT_PANEL_TABLES: ClassVar[dict[str, str]] = {
+        "house-district-panel-races-v1": "races",
+        "house-district-panel-options-v1": "options",
+        "house-district-panel-results-v1": "results",
+        "house-district-panel-fundamentals-v1": "fundamentals",
+        "house-district-panel-polls-v1": "polls",
+    }
 
     def __init__(self, context: ProjectContext) -> None:
         self.context = context
@@ -165,6 +179,22 @@ class CuratedDataBuilder:
                     f"got {table!r}"
                 )
             frame = self._normalize_president_state_panel(frame, parser_version, parser_args)
+        elif parser_version in self.SENATE_STATE_PANEL_TABLES:
+            expected_table = self.SENATE_STATE_PANEL_TABLES[parser_version]
+            if table != expected_table:
+                raise ValueError(
+                    f"{parser_version} must be registered for table {expected_table!r}; "
+                    f"got {table!r}"
+                )
+            frame = self._normalize_senate_state_panel(frame, parser_version, parser_args)
+        elif parser_version in self.HOUSE_DISTRICT_PANEL_TABLES:
+            expected_table = self.HOUSE_DISTRICT_PANEL_TABLES[parser_version]
+            if table != expected_table:
+                raise ValueError(
+                    f"{parser_version} must be registered for table {expected_table!r}; "
+                    f"got {table!r}"
+                )
+            frame = self._normalize_house_district_panel(frame, parser_version, parser_args)
         frame = self._coerce(frame)
         return frame.with_columns(
             pl.lit(row["source_id"]).alias("source_id"),
@@ -611,6 +641,405 @@ class CuratedDataBuilder:
         return frame.join(pl.DataFrame({"as_of_offset_days": offsets}), how="cross").with_columns(
             (pl.col("election_date") - pl.duration(days=pl.col("as_of_offset_days"))).alias("as_of")
         )
+
+    # --- Senate state panel parsers --------------------------------------------------
+
+    def _normalize_senate_state_panel(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        if parser_version == "senate-state-panel-races-v1":
+            return self._senate_state_panel_races(frame, parser_version, parser_args)
+        if parser_version == "senate-state-panel-options-v1":
+            return self._senate_state_panel_options(frame, parser_version, parser_args)
+        if parser_version == "senate-state-panel-results-v1":
+            return self._senate_state_panel_results(frame, parser_version, parser_args)
+        if parser_version == "senate-state-panel-fundamentals-v1":
+            return self._senate_state_panel_fundamentals(frame, parser_version, parser_args)
+        if parser_version == "senate-state-panel-polls-v1":
+            return self._senate_state_panel_polls(frame, parser_version, parser_args)
+        raise ValueError(f"Unsupported senate state panel parser: {parser_version}")
+
+    def _senate_state_panel_base(
+        self,
+        frame: pl.DataFrame,
+        required_columns: set[str],
+        parser_version: str,
+        parser_args: dict[str, object],
+    ) -> pl.DataFrame:
+        required = {"cycle", "state", "election_date"} | required_columns
+        self._require_columns(frame, required, parser_version)
+        generated_race_id = pl.concat_str(
+            [pl.lit("US-SEN-"), pl.col("state"), pl.lit("-"), pl.col("cycle").cast(pl.Utf8)]
+        )
+        race_id = (
+            pl.coalesce(pl.col("race_id").cast(pl.Utf8), generated_race_id)
+            if "race_id" in frame.columns
+            else generated_race_id
+        )
+        base = frame.with_columns(
+            pl.col("cycle").cast(pl.Int64, strict=False),
+            pl.col("state").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("state"),
+            self._date_expr("election_date"),
+        ).with_columns(race_id.alias("race_id"))
+        self._require_non_nulls(
+            base, ["cycle", "state", "election_date", "race_id"], parser_version
+        )
+        cycles = self._panel_cycles(parser_args, parser_version)
+        if cycles:
+            base = base.filter(pl.col("cycle").is_in(cycles))
+        return base
+
+    def _senate_state_panel_races(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._senate_state_panel_base(frame, set(), parser_version, parser_args)
+        return base.select(
+            "race_id",
+            "cycle",
+            "state",
+            "election_date",
+            pl.lit("state").alias("geography_type"),
+            pl.col("state").alias("geography"),
+            pl.lit("senate").alias("office_type"),
+            pl.lit("candidate").alias("race_type"),
+            pl.lit("general").alias("stage"),
+            pl.lit(1, dtype=pl.Int64).alias("seats"),
+            pl.lit("senate").alias("control_body"),
+            pl.lit(None, dtype=pl.Float64).alias("measure_threshold"),
+        )
+
+    def _senate_state_panel_options(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._senate_state_panel_base(
+            frame, self.PRESIDENT_STATE_PANEL_OPTION_COLUMNS, parser_version, parser_args
+        )
+        dem_ids, rep_ids = self._president_state_option_id_columns(base)
+        return self._president_state_party_rows(
+            base,
+            [
+                "cycle", "state", "race_id", "option_id", "name", "party",
+                "incumbent", "previous_vote_share", "fundraising_usd",
+            ],
+            dem_columns={
+                **dem_ids,
+                "name": "dem_name",
+                "incumbent": "dem_incumbent",
+                "previous_vote_share": "dem_previous_vote_share",
+                "fundraising_usd": "dem_fundraising_usd",
+            },
+            rep_columns={
+                **rep_ids,
+                "name": "rep_name",
+                "incumbent": "rep_incumbent",
+                "previous_vote_share": "rep_previous_vote_share",
+                "fundraising_usd": "rep_fundraising_usd",
+            },
+        )
+
+    def _senate_state_panel_results(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._senate_state_panel_base(
+            frame, self.PRESIDENT_STATE_PANEL_RESULT_COLUMNS, parser_version, parser_args
+        )
+        dem_ids, rep_ids = self._president_state_option_id_columns(base)
+        results = self._president_state_party_rows(
+            base,
+            ["cycle", "state", "race_id", "option_id", "party", "vote_share", "turnout", "winner"],
+            dem_columns={**dem_ids, "vote_share": "dem_vote_share", "turnout": "turnout"},
+            rep_columns={**rep_ids, "vote_share": "rep_vote_share", "turnout": "turnout"},
+        ).with_columns(pl.col("vote_share").cast(pl.Float64, strict=False))
+        results = results.filter(pl.col("vote_share").is_not_null())
+        if results.is_empty():
+            return results
+        return results.with_columns(
+            (pl.col("vote_share") == pl.col("vote_share").max().over("race_id")).alias("winner")
+        )
+
+    def _senate_state_panel_fundamentals(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        offsets = self._panel_as_of_offsets(parser_args, parser_version)
+        required = set(self.PRESIDENT_STATE_PANEL_FUNDAMENTAL_COLUMNS)
+        if not offsets:
+            required.add("as_of")
+        base = self._senate_state_panel_base(frame, required, parser_version, parser_args)
+        if offsets:
+            base = self._expand_panel_as_of_offsets(base, offsets)
+        else:
+            base = base.with_columns(
+                self._date_expr("as_of"),
+                pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
+            )
+        self._require_non_nulls(base, ["as_of"], parser_version)
+        return base.select(
+            "cycle", "state", "race_id", "as_of", "as_of_offset_days",
+            "partisan_lean", "incumbency_advantage", "economic_index",
+            "demographic_turnout_index", "historical_turnout_rate", "registered_voters",
+        )
+
+    def _senate_state_panel_polls(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        offsets = self._panel_as_of_offsets(parser_args, parser_version)
+        required = set(self.PRESIDENT_STATE_PANEL_POLL_COLUMNS)
+        if not offsets:
+            required.update({"poll_start_date", "poll_end_date"})
+        base = self._senate_state_panel_base(frame, required, parser_version, parser_args)
+        if offsets:
+            duration_days = self._panel_poll_duration_days(parser_args, parser_version)
+            base = self._expand_panel_as_of_offsets(base, offsets).with_columns(
+                pl.col("as_of").alias("end_date"),
+                (pl.col("as_of") - pl.duration(days=duration_days)).alias("start_date"),
+            )
+        else:
+            base = base.with_columns(
+                self._date_expr("poll_start_date"),
+                self._date_expr("poll_end_date"),
+                pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
+            ).with_columns(
+                pl.col("poll_start_date").alias("start_date"),
+                pl.col("poll_end_date").alias("end_date"),
+            )
+        self._require_non_nulls(base, ["start_date", "end_date"], parser_version)
+        base = base.with_columns(
+            pl.when(pl.col("as_of_offset_days").is_not_null())
+            .then(pl.concat_str([pl.lit("t"), pl.col("as_of_offset_days").cast(pl.Utf8)]))
+            .otherwise(pl.col("end_date").cast(pl.Utf8))
+            .alias("_poll_key")
+        )
+        dem_ids, rep_ids = self._president_state_option_id_columns(base)
+        polls = self._president_state_party_rows(
+            base,
+            [
+                "poll_id", "cycle", "state", "race_id", "pollster",
+                "start_date", "end_date", "population", "sample_size",
+                "sponsor_class", "methodology", "option_id", "pct", "as_of_offset_days",
+            ],
+            dem_columns={**dem_ids, "pct": "dem_poll_pct"},
+            rep_columns={**rep_ids, "pct": "rep_poll_pct"},
+            common_columns={
+                "pollster": "pollster",
+                "start_date": "start_date",
+                "end_date": "end_date",
+                "population": "poll_population",
+                "sample_size": "poll_sample_size",
+                "sponsor_class": "poll_sponsor_class",
+                "methodology": "poll_methodology",
+                "as_of_offset_days": "as_of_offset_days",
+            },
+            poll_key_column="_poll_key",
+        ).with_columns(
+            pl.col("pct").cast(pl.Float64, strict=False),
+            pl.col("population").cast(pl.Utf8).str.to_lowercase(),
+            pl.col("sponsor_class").cast(pl.Utf8).str.to_lowercase(),
+            pl.col("methodology").cast(pl.Utf8).str.to_lowercase(),
+        )
+        return polls.filter(pl.col("pct").is_not_null())
+
+    # --- House district panel parsers ------------------------------------------------
+
+    def _normalize_house_district_panel(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        if parser_version == "house-district-panel-races-v1":
+            return self._house_district_panel_races(frame, parser_version, parser_args)
+        if parser_version == "house-district-panel-options-v1":
+            return self._house_district_panel_options(frame, parser_version, parser_args)
+        if parser_version == "house-district-panel-results-v1":
+            return self._house_district_panel_results(frame, parser_version, parser_args)
+        if parser_version == "house-district-panel-fundamentals-v1":
+            return self._house_district_panel_fundamentals(frame, parser_version, parser_args)
+        if parser_version == "house-district-panel-polls-v1":
+            return self._house_district_panel_polls(frame, parser_version, parser_args)
+        raise ValueError(f"Unsupported house district panel parser: {parser_version}")
+
+    def _house_district_panel_base(
+        self,
+        frame: pl.DataFrame,
+        required_columns: set[str],
+        parser_version: str,
+        parser_args: dict[str, object],
+    ) -> pl.DataFrame:
+        required = {"cycle", "state", "district", "election_date"} | required_columns
+        self._require_columns(frame, required, parser_version)
+        generated_race_id = pl.concat_str(
+            [pl.lit("US-HOUSE-"), pl.col("district"), pl.lit("-"), pl.col("cycle").cast(pl.Utf8)]
+        )
+        race_id = (
+            pl.coalesce(pl.col("race_id").cast(pl.Utf8), generated_race_id)
+            if "race_id" in frame.columns
+            else generated_race_id
+        )
+        base = frame.with_columns(
+            pl.col("cycle").cast(pl.Int64, strict=False),
+            pl.col("state").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("state"),
+            pl.col("district").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("district"),
+            self._date_expr("election_date"),
+        ).with_columns(race_id.alias("race_id"))
+        self._require_non_nulls(
+            base, ["cycle", "state", "district", "election_date", "race_id"], parser_version
+        )
+        cycles = self._panel_cycles(parser_args, parser_version)
+        if cycles:
+            base = base.filter(pl.col("cycle").is_in(cycles))
+        return base
+
+    def _house_district_panel_races(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._house_district_panel_base(frame, set(), parser_version, parser_args)
+        return base.select(
+            "race_id",
+            "cycle",
+            "state",
+            "election_date",
+            pl.lit("district").alias("geography_type"),
+            pl.col("district").alias("geography"),
+            pl.lit("house").alias("office_type"),
+            pl.lit("candidate").alias("race_type"),
+            pl.lit("general").alias("stage"),
+            pl.lit(1, dtype=pl.Int64).alias("seats"),
+            pl.lit("house").alias("control_body"),
+            pl.lit(None, dtype=pl.Float64).alias("measure_threshold"),
+        )
+
+    def _house_district_panel_options(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._house_district_panel_base(
+            frame, self.PRESIDENT_STATE_PANEL_OPTION_COLUMNS, parser_version, parser_args
+        )
+        dem_ids, rep_ids = self._president_state_option_id_columns(base)
+        return self._president_state_party_rows(
+            base,
+            [
+                "cycle", "state", "race_id", "option_id", "name", "party",
+                "incumbent", "previous_vote_share", "fundraising_usd",
+            ],
+            dem_columns={
+                **dem_ids,
+                "name": "dem_name",
+                "incumbent": "dem_incumbent",
+                "previous_vote_share": "dem_previous_vote_share",
+                "fundraising_usd": "dem_fundraising_usd",
+            },
+            rep_columns={
+                **rep_ids,
+                "name": "rep_name",
+                "incumbent": "rep_incumbent",
+                "previous_vote_share": "rep_previous_vote_share",
+                "fundraising_usd": "rep_fundraising_usd",
+            },
+        )
+
+    def _house_district_panel_results(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        base = self._house_district_panel_base(
+            frame, self.PRESIDENT_STATE_PANEL_RESULT_COLUMNS, parser_version, parser_args
+        )
+        dem_ids, rep_ids = self._president_state_option_id_columns(base)
+        results = self._president_state_party_rows(
+            base,
+            ["cycle", "state", "race_id", "option_id", "party", "vote_share", "turnout", "winner"],
+            dem_columns={**dem_ids, "vote_share": "dem_vote_share", "turnout": "turnout"},
+            rep_columns={**rep_ids, "vote_share": "rep_vote_share", "turnout": "turnout"},
+        ).with_columns(pl.col("vote_share").cast(pl.Float64, strict=False))
+        results = results.filter(pl.col("vote_share").is_not_null())
+        if results.is_empty():
+            return results
+        return results.with_columns(
+            (pl.col("vote_share") == pl.col("vote_share").max().over("race_id")).alias("winner")
+        )
+
+    def _house_district_panel_fundamentals(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        offsets = self._panel_as_of_offsets(parser_args, parser_version)
+        required = set(self.PRESIDENT_STATE_PANEL_FUNDAMENTAL_COLUMNS)
+        if not offsets:
+            required.add("as_of")
+        base = self._house_district_panel_base(frame, required, parser_version, parser_args)
+        if offsets:
+            base = self._expand_panel_as_of_offsets(base, offsets)
+        else:
+            base = base.with_columns(
+                self._date_expr("as_of"),
+                pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
+            )
+        self._require_non_nulls(base, ["as_of"], parser_version)
+        return base.select(
+            "cycle", "state", "race_id", "as_of", "as_of_offset_days",
+            "partisan_lean", "incumbency_advantage", "economic_index",
+            "demographic_turnout_index", "historical_turnout_rate", "registered_voters",
+        )
+
+    def _house_district_panel_polls(
+        self, frame: pl.DataFrame, parser_version: str, parser_args: dict[str, object]
+    ) -> pl.DataFrame:
+        offsets = self._panel_as_of_offsets(parser_args, parser_version)
+        required = set(self.PRESIDENT_STATE_PANEL_POLL_COLUMNS)
+        if not offsets:
+            required.update({"poll_start_date", "poll_end_date"})
+        # Restrict to competitive districts so the polling component fits a manageable set.
+        base_frame = frame
+        if "competitive" in frame.columns:
+            base_frame = frame.filter(pl.col("competitive"))
+        base = self._house_district_panel_base(
+            base_frame, required, parser_version, parser_args
+        )
+        if offsets:
+            duration_days = self._panel_poll_duration_days(parser_args, parser_version)
+            base = self._expand_panel_as_of_offsets(base, offsets).with_columns(
+                pl.col("as_of").alias("end_date"),
+                (pl.col("as_of") - pl.duration(days=duration_days)).alias("start_date"),
+            )
+        else:
+            base = base.with_columns(
+                self._date_expr("poll_start_date"),
+                self._date_expr("poll_end_date"),
+                pl.lit(None, dtype=pl.Int64).alias("as_of_offset_days"),
+            ).with_columns(
+                pl.col("poll_start_date").alias("start_date"),
+                pl.col("poll_end_date").alias("end_date"),
+            )
+        self._require_non_nulls(base, ["start_date", "end_date"], parser_version)
+        base = base.with_columns(
+            pl.when(pl.col("as_of_offset_days").is_not_null())
+            .then(pl.concat_str([pl.lit("t"), pl.col("as_of_offset_days").cast(pl.Utf8)]))
+            .otherwise(pl.col("end_date").cast(pl.Utf8))
+            .alias("_poll_key")
+        )
+        dem_ids, rep_ids = self._president_state_option_id_columns(base)
+        polls = self._president_state_party_rows(
+            base,
+            [
+                "poll_id", "cycle", "state", "race_id", "pollster",
+                "start_date", "end_date", "population", "sample_size",
+                "sponsor_class", "methodology", "option_id", "pct", "as_of_offset_days",
+            ],
+            dem_columns={**dem_ids, "pct": "dem_poll_pct"},
+            rep_columns={**rep_ids, "pct": "rep_poll_pct"},
+            common_columns={
+                "pollster": "pollster",
+                "start_date": "start_date",
+                "end_date": "end_date",
+                "population": "poll_population",
+                "sample_size": "poll_sample_size",
+                "sponsor_class": "poll_sponsor_class",
+                "methodology": "poll_methodology",
+                "as_of_offset_days": "as_of_offset_days",
+            },
+            poll_key_column="_poll_key",
+        ).with_columns(
+            pl.col("pct").cast(pl.Float64, strict=False),
+            pl.col("population").cast(pl.Utf8).str.to_lowercase(),
+            pl.col("sponsor_class").cast(pl.Utf8).str.to_lowercase(),
+            pl.col("methodology").cast(pl.Utf8).str.to_lowercase(),
+        )
+        return polls.filter(pl.col("pct").is_not_null())
 
     def _normalize_538_president_polls(
         self, frame: pl.DataFrame, parser_args: dict[str, object] | None = None

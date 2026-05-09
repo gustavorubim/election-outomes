@@ -176,6 +176,125 @@ open artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/resu
 Use this benchmark to inspect misses and calibration. Do not tune directly against 2024
 actuals; use cross-cycle evidence and rolling-origin backtests.
 
+## Senate And House Analysis
+
+The engine ships parallel scenarios for U.S. Senate (state-level) and U.S. House
+(district-level) races with their own panels, parsers, and source registries. Reports
+lead with the **majority story**: each chamber has its own configured threshold (Senate
+51, House 218) and the control forecast surfaces holdover seats, modeled seats,
+seat-count distribution, and majority probability per party.
+
+### Senate Cycle Analysis
+
+Run rolling-origin same-date evaluation across Senate Class I/II/III rotations from
+2014–2024:
+
+```bash
+uv run election-outcomes results cycle-eval \
+  --cycles 2014,2016,2018,2020,2022,2024 \
+  --as-of-mm-dd 11-04 \
+  --scenario-template "senate_{cycle}_state" \
+  --forecast-run-prefix sen-eval \
+  --office-type senate \
+  --sources-config sources_senate.yaml \
+  --data-dir data/senate \
+  --artifacts-dir artifacts/senate \
+  --run-id senate-cycles-2014-2024
+```
+
+Open the dashboard:
+
+```bash
+open artifacts/senate/cycle_evals/senate-cycles-2014-2024/cycle_eval.html
+```
+
+Each per-cycle forecast lives at
+`artifacts/senate/runs/sen-eval-<cycle>-1104/` with the full diagnostics, model card,
+silver benchmark, control forecast, and forecast-vs-actual comparison.
+
+### House Cycle Analysis
+
+Same-date evaluation across the 6 most recent House cycles:
+
+```bash
+uv run election-outcomes results cycle-eval \
+  --cycles 2014,2016,2018,2020,2022,2024 \
+  --as-of-mm-dd 11-04 \
+  --scenario-template "house_{cycle}_district" \
+  --forecast-run-prefix hou-eval \
+  --office-type house \
+  --sources-config sources_house.yaml \
+  --data-dir data/house \
+  --artifacts-dir artifacts/house \
+  --run-id house-cycles-2014-2024
+```
+
+Open the dashboard:
+
+```bash
+open artifacts/house/cycle_evals/house-cycles-2014-2024/cycle_eval.html
+```
+
+The House panel covers all 435 districts × 6 cycles spanning two redistricting eras
+(`2012_2020` and `2022_plus`). Polls are restricted to competitive districts; safe
+seats are forecast through fundamentals only.
+
+### Defining Majority In Reports
+
+`control_forecasts.parquet` for each Senate/House run carries:
+
+- `control_threshold` — 51 for Senate, 218 for House (from `configs/model.yaml`).
+- `holdover_seats` — Senate seats not up that cycle, sourced from the scenario.
+- `modeled_seats` — number of seats actually being contested.
+- `seat_count_modeled_mean` — mean seats won in modeled races (across draws).
+- `seat_count_mean`, `seat_count_p10/p50/p90` — total post-cycle seats including
+  holdovers, with 80% interval.
+- `majority_probability` — `P(seat_count >= control_threshold)`.
+- `seats_to_majority_mean` — seats short of majority on average.
+- `tipping_point_races`, `pivotal_rates` — most pivotal contests for control.
+
+`cycle_eval.html` and `narrative.md` lead with chamber name + threshold, then per-cycle
+DEM/REP majority probabilities, mean seat counts, race accuracy, and missed
+states/districts.
+
+### Source Registries For Each Chamber
+
+```text
+configs/sources.yaml         # Presidential state-panel + fixture defaults.
+configs/sources_senate.yaml  # Senate state-panel (Class rotation), 6 cycles.
+configs/sources_house.yaml   # House district-panel, 6 cycles, 2 redistricting eras.
+configs/sources_live.yaml    # Live 538 polling overlay (extends sources.yaml).
+```
+
+Each registry supports `extends:` to layer real-data adapters on top of the panel
+fixture without duplicating non-conflicting entries.
+
+### Scenarios
+
+```text
+president_state, president_2000_state ... president_2024_state
+senate_state,    senate_2014_state    ... senate_2024_state, senate_2026_state
+house_district,  house_2014_district  ... house_2024_district, house_2026_district
+```
+
+Senate scenarios declare `senate_class` (I/II/III) and `holdovers` (DEM/REP/IND seat
+counts not up that cycle). House scenarios declare `redistricting_era` so rolling
+origin training stays within a comparable boundary regime.
+
+### Synthetic Panel Honesty
+
+The 2014–2024 Senate and House panels are deterministic procedural draws that match
+aggregate historical patterns (D/R seat swings, Cook PVI distribution, incumbency
+advantage). They are not actual historical results. The harness exists to exercise
+the rolling-origin and majority-threshold contracts at scale; production runs should
+ingest real returns from MIT Election Lab + 538 senate/house polls. Regenerate panels
+with:
+
+```bash
+uv run python scripts/generate_senate_panel.py
+uv run python scripts/generate_house_panel.py
+```
+
 ## What To Inspect
 
 Important forecast artifacts:

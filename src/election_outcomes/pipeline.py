@@ -92,9 +92,11 @@ class ForecastPipeline:
             ).run(bundle),
         ]
         ensemble = EnsembleModel(model_config).run(bundle, component_estimates)
-        outputs = SimulationEngine(model_config, residual_covariance=residual_covariance).run(
-            bundle, ensemble
-        )
+        outputs = SimulationEngine(
+            model_config,
+            residual_covariance=residual_covariance,
+            holdovers=scenario_obj.holdovers if scenario_obj else None,
+        ).run(bundle, ensemble)
         race_forecasts = self._attach_lineage(outputs.race_forecasts, model_config, source_manifest)
         race_catalog = self._attach_model_hash(bundle.race_catalog, model_config)
         out_dir = self.context.artifacts_dir / "runs" / run_id
@@ -288,6 +290,7 @@ class ForecastPipeline:
                 office_type=office_type,
                 reuse_existing=reuse_existing,
             )
+            scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
             rows.append(
                 self._cycle_eval_row(
                     cycle=cycle,
@@ -296,6 +299,7 @@ class ForecastPipeline:
                     forecast_run_dir=forecast_run_dir,
                     comparison=comparison,
                     output_dir=output_dir,
+                    scenario=scenario_obj,
                 )
             )
         return CycleEvaluationReport().render(
@@ -408,7 +412,7 @@ class ForecastPipeline:
         errors: list[str] = []
         for cycle in cycles:
             try:
-                as_of = date.fromisoformat(f"{cycle}-{as_of_mm_dd}")
+                requested_as_of = date.fromisoformat(f"{cycle}-{as_of_mm_dd}")
             except ValueError:
                 errors.append(f"{cycle}-{as_of_mm_dd} is not a valid date")
                 continue
@@ -418,10 +422,26 @@ class ForecastPipeline:
                 errors.append(f"scenario_template failed for cycle {cycle}: {exc}")
                 continue
             try:
-                registry.get(scenario)
+                scenario_obj = registry.get(scenario)
             except ValueError:
                 errors.append(f"unknown scenario {scenario!r} for cycle {cycle}")
                 continue
+            # If the requested as_of falls after the scenario's election day, use the
+            # scenario default_as_of (typically election_date - 1 day) so the active
+            # bundle filter (election_date >= cutoff) still includes the cycle's races.
+            as_of = requested_as_of
+            if scenario_obj is not None:
+                election_str = (
+                    scenario_obj.payload.get("election_date") if scenario_obj.payload else None
+                )
+                if election_str:
+                    election_date = date.fromisoformat(str(election_str))
+                    if as_of > election_date:
+                        default_as_of = scenario_obj.default_as_of
+                        if default_as_of:
+                            as_of = date.fromisoformat(default_as_of)
+                        else:
+                            as_of = election_date
             plan.append({"cycle": cycle, "scenario": scenario, "as_of": as_of.isoformat()})
         if errors:
             raise ValueError("Invalid cycle evaluation request: " + "; ".join(errors))
@@ -471,11 +491,27 @@ class ForecastPipeline:
         forecast_run_dir: Path,
         comparison: dict[str, Any],
         output_dir: Path,
+        scenario: Scenario | None = None,
     ) -> dict[str, Any]:
         control = pl.read_parquet(forecast_run_dir / "control_forecasts.parquet")
         winner = (
             control.sort("control_probability", descending=True).row(0, named=True)
             if not control.is_empty()
+            else {}
+        )
+        actual_majority_party = ForecastPipeline._actual_majority_winner(
+            comparison=comparison,
+            control=control,
+            scenario=scenario,
+        )
+        dem_row = (
+            control.filter(pl.col("party") == "DEM").row(0, named=True)
+            if not control.is_empty() and (control["party"] == "DEM").any()
+            else {}
+        )
+        rep_row = (
+            control.filter(pl.col("party") == "REP").row(0, named=True)
+            if not control.is_empty() and (control["party"] == "REP").any()
             else {}
         )
         actual_winner_probabilities = comparison.get("actual_winner_probabilities") or []
@@ -485,7 +521,7 @@ class ForecastPipeline:
             if not bool(row.get("race_winner_correct"))
         ]
         electoral_college = comparison.get("electoral_college") or {}
-        actual_ec_winner = electoral_college.get("actual_winner_party")
+        actual_ec_winner = electoral_college.get("actual_winner_party") or actual_majority_party
         forecast_ec_winner = winner.get("party")
         ec_winner_accuracy = (
             float(forecast_ec_winner == actual_ec_winner)
@@ -497,6 +533,8 @@ class ForecastPipeline:
             "cycle": cycle,
             "as_of": as_of,
             "forecast_run_id": forecast_run_id,
+            "control_body": winner.get("control_body"),
+            "majority_threshold": winner.get("control_threshold"),
             "forecast_ec_winner_party": winner.get("party"),
             "actual_ec_winner_party": actual_ec_winner,
             "state_topline_ec_winner_party": electoral_college.get("predicted_winner_party"),
@@ -505,9 +543,15 @@ class ForecastPipeline:
             "forecast_ec_p10": winner.get("seat_count_p10"),
             "forecast_ec_p50": winner.get("seat_count_p50"),
             "forecast_ec_p90": winner.get("seat_count_p90"),
+            "dem_seat_count_mean": dem_row.get("seat_count_mean"),
+            "rep_seat_count_mean": rep_row.get("seat_count_mean"),
+            "dem_majority_probability": dem_row.get("majority_probability"),
+            "rep_majority_probability": rep_row.get("majority_probability"),
             "ec_winner_accuracy": ec_winner_accuracy,
-            "state_accuracy": comparison.get("state_accuracy"),
-            "state_accuracy_n": comparison.get("state_accuracy_n"),
+            "state_accuracy": comparison.get("state_accuracy")
+            or comparison.get("winner_accuracy"),
+            "state_accuracy_n": comparison.get("state_accuracy_n")
+            or comparison.get("race_count"),
             "brier_score": comparison.get("brier_score"),
             "mean_absolute_vote_share_error": comparison.get("mean_absolute_vote_share_error"),
             "upset_count": comparison.get("upset_count"),
@@ -518,6 +562,41 @@ class ForecastPipeline:
                 comparison_dir / "result_comparison.html", output_dir
             ),
         }
+
+    @staticmethod
+    def _actual_majority_winner(
+        comparison: dict[str, Any],
+        control: pl.DataFrame,
+        scenario: Scenario | None,
+    ) -> str | None:
+        if scenario is None or control.is_empty():
+            return None
+        race_outcomes = comparison.get("race_outcomes") or []
+        if not race_outcomes:
+            return None
+        seats_by_party: dict[str, int] = {}
+        for row in race_outcomes:
+            party = row.get("actual_winner_party")
+            if not party:
+                continue
+            seats_by_party[str(party).upper()] = seats_by_party.get(
+                str(party).upper(), 0
+            ) + int(row.get("seats") or 1)
+        for party, holdovers in scenario.holdovers.items():
+            seats_by_party[party] = seats_by_party.get(party, 0) + int(holdovers)
+        threshold = (
+            int(control["control_threshold"][0])
+            if "control_threshold" in control.columns and control.height > 0
+            else None
+        )
+        if threshold is None:
+            return None
+        winners = [party for party, seats in seats_by_party.items() if seats >= threshold]
+        if len(winners) == 1:
+            return winners[0]
+        if not seats_by_party:
+            return None
+        return max(seats_by_party.items(), key=lambda item: item[1])[0]
 
     @staticmethod
     def _active_bundle(bundle: FeatureBundle, as_of: str) -> FeatureBundle:
