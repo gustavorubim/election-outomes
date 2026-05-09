@@ -296,6 +296,12 @@ The key interpretation fields are:
 - `actual_winner_probabilities`: race-level probability assigned to each actual winner.
 - `largest_misses`: the largest option-level vote-share misses by absolute error.
 
+For multiple presidential cycles at the same forecast cut, prefer `results cycle-eval`.
+It runs each `president_<cycle>_state` scenario, compares against actuals, and writes a
+single dashboard with Electoral College probability, state accuracy, Brier score,
+vote-share error, missed states, and links back to each run's diagnostics and comparison
+report.
+
 ## First Live Poll Run
 
 The first live-ingestion path uses FiveThirtyEight's public Datasette CSV stream for
@@ -434,21 +440,23 @@ PY
 Run a same-date historical benchmark sweep:
 
 ```bash
-for cycle in 2008 2012 2016 2020 2024; do
-  PYTHONPATH=src uv run election-outcomes forecast run \
-    --scenario president_${cycle}_state \
-    --as-of ${cycle}-10-05 \
-    --run-id eval-${cycle}-oct5 \
-    --data-dir data/cycle-eval \
-    --artifacts-dir artifacts/cycle-eval
-  PYTHONPATH=src uv run election-outcomes results compare \
-    --forecast-run-id eval-${cycle}-oct5 \
-    --comparison-id actuals \
-    --cycle $cycle \
-    --office-type president \
-    --data-dir data/cycle-eval \
-    --artifacts-dir artifacts/cycle-eval
-done
+PYTHONPATH=src uv run election-outcomes results cycle-eval \
+  --run-id oct5-presidential-cycle-eval \
+  --cycles 2008,2012,2016,2020,2024 \
+  --as-of-mm-dd 10-05 \
+  --data-dir data/cycle-eval \
+  --artifacts-dir artifacts/cycle-eval
+```
+
+Cycle-eval output:
+
+```text
+artifacts/cycle-eval/cycle_evals/oct5-presidential-cycle-eval/
+  cycle_summary.parquet
+  cycle_summary.json
+  cycle_eval.html
+  narrative.md
+  plots/
 ```
 
 ## Performance Run

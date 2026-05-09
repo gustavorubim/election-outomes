@@ -36,6 +36,13 @@ def _context(
     )
 
 
+def _parse_cycles(cycles: str) -> list[int]:
+    values = [part.strip() for part in cycles.split(",") if part.strip()]
+    if not values:
+        raise typer.BadParameter("Provide at least one cycle")
+    return [int(value) for value in values]
+
+
 @app.command()
 def sync(
     root: Path | None = typer.Option(None, help="Project root."),
@@ -186,6 +193,53 @@ def results_compare(
     console.print(
         "[green]Comparison complete[/green]: "
         f"{payload['race_count']} races, winner accuracy={payload['winner_accuracy']}"
+    )
+    console.print(payload["output_dir"])
+
+
+@results_app.command("cycle-eval")
+def results_cycle_eval(
+    cycles: str = typer.Option(
+        "2008,2012,2016,2020,2024",
+        help="Comma-separated presidential cycles to evaluate.",
+    ),
+    as_of_mm_dd: str = typer.Option(
+        "10-05", help="Same-date forecast cut in MM-DD form, e.g. 10-05."
+    ),
+    run_id: str | None = typer.Option(None, help="Stable cycle-eval run id."),
+    scenario_template: str = typer.Option(
+        "president_{cycle}_state", help="Scenario key template containing {cycle}."
+    ),
+    forecast_run_prefix: str = typer.Option("eval", help="Prefix for generated forecast run ids."),
+    comparison_id: str = typer.Option("actuals", help="Comparison id inside each forecast run."),
+    office_type: str = typer.Option("president", help="Office type passed to results compare."),
+    root: Path | None = typer.Option(None, help="Project root."),
+    sources_config: str = typer.Option("sources.yaml", help="Source registry config file."),
+    data_dir: Path | None = typer.Option(None, help="Data directory override."),
+    artifacts_dir: Path | None = typer.Option(None, help="Artifacts directory override."),
+) -> None:
+    """Run same-date forecast-vs-actual comparisons across historical cycles."""
+    context = _context(
+        root=root,
+        sources_config=sources_config,
+        data_dir=data_dir,
+        artifacts_dir=artifacts_dir,
+    )
+    payload = ForecastPipeline(context).run_cycle_eval(
+        cycles=_parse_cycles(cycles),
+        as_of_mm_dd=as_of_mm_dd,
+        run_id=run_id,
+        scenario_template=scenario_template,
+        forecast_run_prefix=forecast_run_prefix,
+        comparison_id=comparison_id,
+        office_type=office_type,
+    )
+    aggregate = payload["aggregate"]
+    console.print(
+        "[green]Cycle evaluation complete[/green]: "
+        f"{payload['cycle_count']} cycles, "
+        f"mean state accuracy={aggregate['mean_state_accuracy']:.3f}, "
+        f"mean Brier={aggregate['mean_brier_score']:.4f}"
     )
     console.print(payload["output_dir"])
 

@@ -316,6 +316,35 @@ def test_presidential_result_comparison(tmp_path: Path) -> None:
     assert comparison.filter(pl.col("actual_winner")).height == payload["race_count"]
 
 
+def test_cycle_eval_writes_consolidated_dashboard(tmp_path: Path) -> None:
+    ctx = context(tmp_path)
+    payload = ForecastPipeline(ctx).run_cycle_eval(
+        cycles=[2020, 2024], as_of_mm_dd="10-05", run_id="cycle-smoke"
+    )
+    out_dir = Path(payload["output_dir"])
+    summary = pl.read_parquet(out_dir / "cycle_summary.parquet")
+
+    assert payload["cycle_count"] == 2
+    assert summary.height == 2
+    assert {"forecast_ec_winner_party", "state_accuracy", "brier_score"}.issubset(summary.columns)
+    assert payload["aggregate"]["ec_winner_accuracy"] in {0.0, 0.5, 1.0}
+    assert (out_dir / "cycle_summary.json").exists()
+    assert (out_dir / "cycle_eval.html").read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert (out_dir / "narrative.md").exists()
+    assert (out_dir / "plots" / "ec_winner_probability_by_cycle.png").stat().st_size > 0
+    assert (out_dir / "plots" / "accuracy_brier_by_cycle.png").stat().st_size > 0
+    assert (out_dir / "plots" / "error_upsets_by_cycle.png").stat().st_size > 0
+    assert (ctx.artifacts_dir / "runs" / "eval-2024-1005" / "diagnostics.html").exists()
+    assert (
+        ctx.artifacts_dir
+        / "runs"
+        / "eval-2024-1005"
+        / "comparisons"
+        / "actuals"
+        / "result_comparison.html"
+    ).exists()
+
+
 def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     tmp_path: Path,
 ) -> None:

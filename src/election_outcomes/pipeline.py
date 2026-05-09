@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,12 @@ from election_outcomes.reports import (
     SilverStyleBenchmark,
     benchmark_to_json,
 )
-from election_outcomes.scoring import BacktestRunner, ResultComparator, RewardEvaluator
+from election_outcomes.scoring import (
+    BacktestRunner,
+    CycleEvaluationReport,
+    ResultComparator,
+    RewardEvaluator,
+)
 from election_outcomes.storage.io import write_json, write_parquet, write_text
 
 
@@ -249,6 +255,48 @@ class ForecastPipeline:
             race_id=race_id,
         )
 
+    def run_cycle_eval(
+        self,
+        cycles: list[int],
+        as_of_mm_dd: str,
+        run_id: str | None = None,
+        scenario_template: str = "president_{cycle}_state",
+        forecast_run_prefix: str = "eval",
+        comparison_id: str = "actuals",
+        office_type: str = "president",
+    ) -> dict[str, Any]:
+        run_id = run_id or datetime.now(UTC).strftime("cycle-eval-%Y%m%dT%H%M%SZ")
+        self._validate_as_of_mm_dd(as_of_mm_dd)
+        output_dir = self.context.artifacts_dir / "cycle_evals" / run_id
+        rows: list[dict[str, Any]] = []
+        for cycle in cycles:
+            scenario = scenario_template.format(cycle=cycle)
+            as_of = f"{cycle}-{as_of_mm_dd}"
+            as_of_slug = as_of_mm_dd.replace("-", "")
+            forecast_run_id = f"{forecast_run_prefix}-{cycle}-{as_of_slug}"
+            forecast_run_dir = self.run_forecast(
+                as_of=as_of, run_id=forecast_run_id, scenario=scenario
+            )
+            comparison = self.compare_results(
+                forecast_run_id=forecast_run_id,
+                comparison_id=comparison_id,
+                cycle=cycle,
+                office_type=office_type,
+            )
+            rows.append(
+                self._cycle_eval_row(
+                    cycle=cycle,
+                    as_of=as_of,
+                    forecast_run_id=forecast_run_id,
+                    forecast_run_dir=forecast_run_dir,
+                    comparison=comparison,
+                    output_dir=output_dir,
+                )
+            )
+        return CycleEvaluationReport().render(
+            rows=rows, output_dir=output_dir, run_id=run_id, as_of_mm_dd=as_of_mm_dd
+        )
+
     def rebuild_report(self, run_id: str) -> Path:
         out_dir = self.context.artifacts_dir / "runs" / run_id
         model_config = self.context.read_yaml("model.yaml")
@@ -341,6 +389,59 @@ class ForecastPipeline:
     def _read_optional_curated(self, name: str) -> pl.DataFrame:
         path = self.context.curated_dir / f"{name}.parquet"
         return pl.read_parquet(path) if path.exists() else pl.DataFrame()
+
+    @staticmethod
+    def _validate_as_of_mm_dd(as_of_mm_dd: str) -> None:
+        parts = as_of_mm_dd.split("-")
+        if len(parts) != 2:
+            raise ValueError("as_of_mm_dd must use MM-DD format")
+        month, day = (int(part) for part in parts)
+        date(2024, month, day)
+
+    @staticmethod
+    def _cycle_eval_row(
+        cycle: int,
+        as_of: str,
+        forecast_run_id: str,
+        forecast_run_dir: Path,
+        comparison: dict[str, Any],
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        control = pl.read_parquet(forecast_run_dir / "control_forecasts.parquet")
+        winner = (
+            control.sort("control_probability", descending=True).row(0, named=True)
+            if not control.is_empty()
+            else {}
+        )
+        actual_winner_probabilities = comparison.get("actual_winner_probabilities") or []
+        missed_states = [
+            str(row.get("geography"))
+            for row in actual_winner_probabilities
+            if not bool(row.get("race_winner_correct"))
+        ]
+        comparison_dir = Path(str(comparison["output_dir"]))
+        return {
+            "cycle": cycle,
+            "as_of": as_of,
+            "forecast_run_id": forecast_run_id,
+            "forecast_ec_winner_party": winner.get("party"),
+            "forecast_ec_win_probability": winner.get("control_probability"),
+            "forecast_ec_p10": winner.get("seat_count_p10"),
+            "forecast_ec_p50": winner.get("seat_count_p50"),
+            "forecast_ec_p90": winner.get("seat_count_p90"),
+            "ec_winner_accuracy": comparison.get("ec_winner_accuracy"),
+            "state_accuracy": comparison.get("state_accuracy"),
+            "state_accuracy_n": comparison.get("state_accuracy_n"),
+            "brier_score": comparison.get("brier_score"),
+            "mean_absolute_vote_share_error": comparison.get("mean_absolute_vote_share_error"),
+            "upset_count": comparison.get("upset_count"),
+            "missed_states": ", ".join(missed_states),
+            "race_count": comparison.get("race_count"),
+            "diagnostics_path": os.path.relpath(forecast_run_dir / "diagnostics.html", output_dir),
+            "comparison_path": os.path.relpath(
+                comparison_dir / "result_comparison.html", output_dir
+            ),
+        }
 
     @staticmethod
     def _active_bundle(bundle: FeatureBundle, as_of: str) -> FeatureBundle:

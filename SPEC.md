@@ -270,6 +270,30 @@ state-level winner accuracy, modeled Electoral College winner accuracy with an e
 `full_electoral_college` or `modeled_state_slice` scope, actual-winner probabilities,
 and the largest option-level vote-share misses.
 
+A same-date presidential cycle evaluation should be available as a first-class command:
+
+```bash
+uv run election-outcomes results cycle-eval \
+  --run-id oct5-presidential-cycle-eval \
+  --cycles 2008,2012,2016,2020,2024 \
+  --as-of-mm-dd 10-05
+```
+
+Cycle-eval output:
+
+```text
+artifacts/cycle_evals/<run_id>/
+  cycle_summary.parquet
+  cycle_summary.json
+  cycle_eval.html
+  narrative.md
+  plots/
+```
+
+The summary must report Electoral College winner probability, EV p10/p50/p90, EC winner
+accuracy, state accuracy, Brier score, vote-share MAE, upset count, missed states, and
+links to each cycle's diagnostics and comparison report.
+
 ## API Credentials
 
 No external credentials are required for fixture-backed runs, backtests, or plots.
