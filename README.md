@@ -381,9 +381,10 @@ Projection plots:
 - `topline_electoral_swarm.png`: 538-inspired representative simulation swarm with
   modeled-scope labeling.
 
-`diagnostics.html` now puts these projection/distribution charts at the top of the
-report beside the summary boxes and uses the modeled Electoral College/control winner
-in the hero rather than the highest-probability candidate from one safe state.
+`diagnostics.html` now puts the Electoral College distribution and representative
+simulation swarm together at the top of the report beside the summary boxes. The lower
+projection grid keeps the race/control detail plots and avoids duplicating those two
+top-line Electoral College views.
 
 Trajectory and stability plots:
 

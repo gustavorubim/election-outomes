@@ -365,6 +365,10 @@ def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     assert (out_dir / "plots" / "electoral_college_distribution.png").stat().st_size > 0
     assert (out_dir / "plots" / "electoral_college_chain_traces.png").stat().st_size > 0
     assert (out_dir / "plots" / "topline_electoral_swarm.png").stat().st_size > 0
+    diagnostics = (out_dir / "diagnostics.html").read_text(encoding="utf-8")
+    assert diagnostics.index("plots/topline_electoral_swarm.png") < diagnostics.index(
+        "Distribution And Probability View"
+    )
     assert payload["row_count"] >= 30
     assert payload["sample_size_too_small"] is False
     assert (out_dir / "poll_trajectory.parquet").stat().st_size > 0

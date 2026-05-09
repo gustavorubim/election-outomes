@@ -27,8 +27,9 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
   support, recount risk, and certification-risk probabilities.
 - `source_manifest.parquet`: source ids, URLs/paths, retrieval timestamps, content hashes,
   parser versions, license/terms notes, status, and downstream usage.
-- `diagnostics.html`: top-line summary, Electoral College distribution, scorecards,
-  reward status, source coverage, model-quality section, and embedded plots.
+- `diagnostics.html`: top-line summary, paired Electoral College distribution and
+  simulation swarm, scorecards, reward status, source coverage, model-quality section,
+  and embedded plots.
 - `reward_card.json`: machine-readable reward checks.
 - `methodology_snapshot.md`: model version, config, source coverage, and limitations.
 - `model_card.md`: learned/configured/placeholder parameter status, component admission,
@@ -209,7 +210,8 @@ Every forecast run must emit calibration and projection visuals:
 - Turnout/recount-risk projections.
 - Forecast coverage by tier.
 - Electoral College distribution and representative simulation swarm for presidential
-  scenarios.
+  scenarios. These two top-line presidential views should render together in the lead
+  diagnostics summary, not only in the lower projection grid.
 - Polling probability trajectories when rolling-origin polling probability and as-of
   cut columns are available.
 - Simulation probability convergence when draw-level winner rows are available.

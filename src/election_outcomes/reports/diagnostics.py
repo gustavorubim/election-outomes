@@ -40,13 +40,17 @@ class DiagnosticsReport:
         insight_strip = self._insight_strip(
             race_catalog, control_forecasts, ecosystem_forecasts, backtest_payload
         )
-        ec_distribution = self._single_plot_card(
-            plot_manifest or {}, "electoral_college_distribution.png"
+        topline_plot_cards = self._single_plot_cards(
+            plot_manifest or {},
+            ["electoral_college_distribution.png", "topline_electoral_swarm.png"],
         )
         projection_plots = self._plot_sections(
             plot_manifest or {},
             categories=["projection"],
-            exclude_paths=["plots/electoral_college_distribution.png"],
+            exclude_paths=[
+                "plots/electoral_college_distribution.png",
+                "plots/topline_electoral_swarm.png",
+            ],
         )
         model_quality_plots = self._plot_sections(
             plot_manifest or {},
@@ -85,7 +89,7 @@ class DiagnosticsReport:
       </div>
     </div>
     <div class="summary-plot">
-      {ec_distribution}
+      {topline_plot_cards}
     </div>
   </section>
 
@@ -474,6 +478,15 @@ class DiagnosticsReport:
         return "\n".join(sections) if sections else '<p class="muted">No plots generated.</p>'
 
     @staticmethod
+    def _single_plot_cards(
+        plot_manifest: dict[str, list[dict[str, str]]], filenames: list[str]
+    ) -> str:
+        cards = [
+            DiagnosticsReport._single_plot_card(plot_manifest, filename) for filename in filenames
+        ]
+        return f'<div class="summary-plot-grid">{"".join(cards)}</div>'
+
+    @staticmethod
     def _single_plot_card(plot_manifest: dict[str, list[dict[str, str]]], filename: str) -> str:
         for entries in plot_manifest.values():
             for entry in entries:
@@ -485,7 +498,7 @@ class DiagnosticsReport:
                         f'<img src="{path}" alt="{title}">'
                         f"<figcaption>{title}</figcaption></figure>"
                     )
-        return '<p class="muted">Electoral College distribution plot was not generated.</p>'
+        return f'<p class="muted">Top-line plot was not generated: {html.escape(filename)}.</p>'
 
     @staticmethod
     def _audit_summary(
@@ -595,8 +608,14 @@ h3 { margin: 0 0 8px; }
   margin-bottom: 0;
 }
 .summary-plot { min-width: 0; }
+.summary-plot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  height: 100%;
+}
 .summary-plot-card { height: 100%; }
-.summary-plot-card img { max-height: 470px; object-fit: contain; }
+.summary-plot-card img { max-height: 360px; object-fit: contain; }
 .insight-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -673,6 +692,7 @@ a { color: var(--blue); }
 @media (max-width: 860px) {
   h1 { font-size: 38px; }
   .hero, .two-col, .card-grid, .insight-strip, .plot-grid, .summary-layout,
+  .summary-plot-grid,
   .summary-cards .card-grid, .summary-cards .insight-strip { grid-template-columns: 1fr; }
   .hero-score { max-width: none; }
 }
