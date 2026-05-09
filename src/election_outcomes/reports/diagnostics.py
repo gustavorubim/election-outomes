@@ -26,9 +26,23 @@ class DiagnosticsReport:
         top = self._topline(race_forecasts, control_forecasts)
         css = self._css()
         narrative = self._narrative_blurb(race_forecasts, control_forecasts, backtest_payload)
+        margin_label = "Threshold margin" if top.get("control_body") else "Projected margin"
+        margin_detail = (
+            "vs majority threshold" if top.get("control_body") else "mean two-party margin"
+        )
+        probability_label = "Control probability" if top.get("control_body") else "Top probability"
+        overview_filenames = (
+            ["electoral_college_distribution.png", "topline_electoral_swarm.png"]
+            if top.get("control_body") == "president"
+            else ["seat_count_histogram.png", "control_projection.png"]
+        )
+        overview_plot_cards, overview_plot_paths = self._priority_plot_cards(
+            plot_manifest or {}, overview_filenames
+        )
         distribution_plots = self._plot_sections(
             plot_manifest or {},
             categories=["distribution"],
+            exclude_paths=overview_plot_paths,
         )
         driver_plots = self._plot_sections(
             plot_manifest or {},
@@ -36,7 +50,7 @@ class DiagnosticsReport:
         )
         metric_cards = "\n".join(
             [
-                self._metric_card("Projected margin", top["margin"], "mean two-party margin"),
+                self._metric_card(margin_label, top["margin"], margin_detail),
                 self._metric_card("Forecast rows", race_forecasts.height, "candidate/option rows"),
                 self._metric_card("Sources", source_manifest.height, "manifested inputs"),
                 self._metric_card(
@@ -46,20 +60,10 @@ class DiagnosticsReport:
                 ),
             ]
         )
-        insight_strip = self._insight_strip(
-            race_catalog, control_forecasts, ecosystem_forecasts, backtest_payload
-        )
-        topline_plot_cards = self._single_plot_cards(
-            plot_manifest or {},
-            ["electoral_college_distribution.png", "topline_electoral_swarm.png"],
-        )
         projection_plots = self._plot_sections(
             plot_manifest or {},
             categories=["projection"],
-            exclude_paths=[
-                "plots/electoral_college_distribution.png",
-                "plots/topline_electoral_swarm.png",
-            ],
+            exclude_paths=overview_plot_paths,
         )
         model_quality_plots = self._plot_sections(
             plot_manifest or {},
@@ -74,40 +78,68 @@ class DiagnosticsReport:
   <style>{css}</style>
 </head>
 <body>
-<main class="page">
-  <header class="hero">
+<main class="page diagnostics-dashboard">
+  <header class="hero diagnostics-hero">
     <div>
       <p class="eyebrow">Election forecast diagnostics</p>
       <h1>{html.escape(top["headline"])}</h1>
       <p class="lede">{html.escape(top["lede"])}</p>
     </div>
     <div class="hero-score">
-      <span class="score-label">Top probability</span>
+      <span class="score-label">{html.escape(probability_label)}</span>
       <span class="score-value">{self._pct(top["probability"])}</span>
       <span class="score-subtitle">{html.escape(top["winner_name"])}</span>
     </div>
   </header>
 
-  <section class="summary-layout">
-    <div class="summary-cards">
-      <div class="card-grid">
+  <section class="kpi-strip" aria-label="Forecast summary">
         {metric_cards}
-      </div>
-      <div class="insight-strip">
-        {insight_strip}
-      </div>
-    </div>
-    <div class="summary-plot">
-      {topline_plot_cards}
-    </div>
   </section>
 
   {f'<div class="narrative">{html.escape(narrative)}</div>' if narrative else ""}
 
-  <section class="panel">
+  <section class="overview-layout">
+    <div class="overview-main">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Executive overview</p>
+          <h2>Distribution And Probability View</h2>
+        </div>
+      </div>
+      <div class="overview-plot-grid">
+        {overview_plot_cards or "<p class='muted'>No overview plots generated.</p>"}
+      </div>
+    </div>
+    <aside class="overview-side">
+      <div class="section-head compact-head">
+        <div>
+          <p class="eyebrow">Control readout</p>
+          <h2>Scenario Scope</h2>
+        </div>
+      </div>
+      <p class="scope-summary">
+        {html.escape(str(race_catalog.height))} active races,
+        {html.escape(str(source_manifest.height))} manifested inputs, and
+        {html.escape(str(backtest_payload.get("row_count", 0)))}
+        rolling-origin rows.
+      </p>
+      {self._control_table(control_forecasts)}
+      <div class="section-head compact-head">
+        <div>
+          <p class="eyebrow">Tight races</p>
+          <h2>Closest Contests</h2>
+        </div>
+      </div>
+      {self._closest_race_list(race_forecasts)}
+    </aside>
+  </section>
+
+  <section class="panel plot-panel">
     <div class="section-head">
-      <p class="eyebrow">Outcome distribution</p>
-      <h2>Where The Forecast Lives</h2>
+      <div>
+        <p class="eyebrow">Outcome distribution</p>
+        <h2>Where The Forecast Lives</h2>
+      </div>
     </div>
     <p class="muted">
       Histogram of total seats per party across simulation draws and KDEs of vote
@@ -117,26 +149,34 @@ class DiagnosticsReport:
     {distribution_plots or "<p class='muted'>No distribution plots emitted.</p>"}
   </section>
 
-  <section class="panel topline-plots">
+  <section class="panel plot-panel topline-plots">
     <div class="section-head">
-      <p class="eyebrow">Top-line forecast</p>
-      <h2>Distribution And Probability View</h2>
+      <div>
+        <p class="eyebrow">Top-line forecast</p>
+        <h2>Projection Views</h2>
+      </div>
     </div>
     {projection_plots}
   </section>
 
   <section class="panel">
     <div class="section-head">
-      <p class="eyebrow">Current forecast</p>
-      <h2>Race Probabilities And Vote Share</h2>
+      <div>
+        <p class="eyebrow">Current forecast</p>
+        <h2>Race Probabilities And Vote Share</h2>
+      </div>
     </div>
-    {self._forecast_table(race_forecasts)}
+    <div class="table-shell forecast-shell">
+      {self._forecast_table(race_forecasts)}
+    </div>
   </section>
 
-  <section class="panel">
+  <section class="panel plot-panel">
     <div class="section-head">
-      <p class="eyebrow">Drivers</p>
-      <h2>Tipping Points And Component Decomposition</h2>
+      <div>
+        <p class="eyebrow">Drivers</p>
+        <h2>Tipping Points And Component Decomposition</h2>
+      </div>
     </div>
     <p class="muted">
       Tipping-point bars rank races by the probability that they decide the chamber
@@ -149,15 +189,19 @@ class DiagnosticsReport:
   <section class="two-col">
     <div class="panel">
       <div class="section-head">
-        <p class="eyebrow">Why it moved</p>
-        <h2>Model Drivers</h2>
+        <div>
+          <p class="eyebrow">Why it moved</p>
+          <h2>Model Drivers</h2>
+        </div>
       </div>
       {self._driver_cards(race_forecasts)}
     </div>
     <div class="panel">
       <div class="section-head">
-        <p class="eyebrow">Model health</p>
-        <h2>Trust Gates</h2>
+        <div>
+          <p class="eyebrow">Model health</p>
+          <h2>Trust Gates</h2>
+        </div>
       </div>
       {self._reward_grid(rewards)}
     </div>
@@ -166,24 +210,30 @@ class DiagnosticsReport:
   <section class="two-col">
     <div class="panel">
       <div class="section-head">
-        <p class="eyebrow">Backtest</p>
-        <h2>Scorecard Snapshot</h2>
+        <div>
+          <p class="eyebrow">Backtest</p>
+          <h2>Scorecard Snapshot</h2>
+        </div>
       </div>
       {self._backtest_summary(backtest_payload)}
     </div>
     <div class="panel">
       <div class="section-head">
-        <p class="eyebrow">Methodology</p>
-        <h2>Silver/FiveThirtyEight Benchmark</h2>
+        <div>
+          <p class="eyebrow">Methodology</p>
+          <h2>Silver/FiveThirtyEight Benchmark</h2>
+        </div>
       </div>
       {self._benchmark_summary(methodology_benchmark)}
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel plot-panel">
     <div class="section-head">
-      <p class="eyebrow">Model quality</p>
-      <h2>Model Quality</h2>
+      <div>
+        <p class="eyebrow">Model quality</p>
+        <h2>Model Quality</h2>
+      </div>
     </div>
     <p class="muted model-quality-note">
       Chain traces are MCMC-style split posterior simulation draws. The polling fit is a
@@ -194,8 +244,10 @@ class DiagnosticsReport:
 
   <section class="panel compact">
     <div class="section-head">
-      <p class="eyebrow">Audit trail</p>
-      <h2>Run Metadata</h2>
+      <div>
+        <p class="eyebrow">Audit trail</p>
+        <h2>Run Metadata</h2>
+      </div>
     </div>
     {self._audit_summary(race_catalog, source_manifest, control_forecasts, ecosystem_forecasts)}
   </section>
@@ -209,6 +261,19 @@ class DiagnosticsReport:
         race_forecasts: pl.DataFrame, control_forecasts: pl.DataFrame | None = None
     ) -> dict[str, Any]:
         if control_forecasts is not None and not control_forecasts.is_empty():
+            top_control = control_forecasts.sort("control_probability", descending=True).row(
+                0, named=True
+            )
+            party = str(top_control["party"])
+            probability = float(top_control["control_probability"])
+            mean_count = float(top_control["seat_count_mean"])
+            p10 = top_control.get("seat_count_p10")
+            p90 = top_control.get("seat_count_p90")
+            threshold = int(top_control.get("control_threshold") or 0)
+            body = str(top_control.get("control_body") or "control")
+            modeled = int(top_control.get("modeled_seats") or 0)
+            holdovers = int(top_control.get("holdover_seats") or 0)
+            party_name = {"DEM": "Democrats", "REP": "Republicans"}.get(party.upper(), party)
             president = control_forecasts.filter(pl.col("control_body") == "president")
             if not president.is_empty():
                 top_control = president.sort("control_probability", descending=True).row(
@@ -216,19 +281,54 @@ class DiagnosticsReport:
                 )
                 party = str(top_control["party"])
                 probability = float(top_control["control_probability"])
-                mean_ev = float(top_control["seat_count_mean"])
+                mean_count = float(top_control["seat_count_mean"])
                 threshold = int(top_control.get("control_threshold") or 270)
+                party_name = {"DEM": "Democrats", "REP": "Republicans"}.get(party.upper(), party)
                 return {
-                    "headline": f"{party} leads Electoral College forecast",
+                    "headline": f"{party_name} favored in the Electoral College",
                     "lede": (
-                        f"Mean simulated Electoral College count is {mean_ev:.1f}; "
+                        f"Mean simulated Electoral College count is {mean_count:.1f}; "
                         f"control threshold is {threshold}. Distribution plots below show "
                         "the simulated paths and uncertainty."
                     ),
                     "winner_name": f"{party} EC win",
                     "probability": probability,
-                    "margin": f"{mean_ev - threshold:+.1f} EV vs threshold",
+                    "margin": f"{mean_count - threshold:+.1f} EV vs threshold",
+                    "control_body": "president",
+                    "party": party,
+                    "mean_count": mean_count,
+                    "threshold": threshold,
+                    "p10": top_control.get("seat_count_p10"),
+                    "p90": top_control.get("seat_count_p90"),
                 }
+            body_title = body.title()
+            interval = ""
+            if p10 is not None and p90 is not None:
+                interval = f" Central 80% interval: {float(p10):.0f}-{float(p90):.0f} seats."
+            modeled_note = (
+                f" Includes {holdovers} holdovers and {modeled} modeled seats."
+                if holdovers
+                else f" Covers {modeled} modeled seats."
+            )
+            return {
+                "headline": f"{party_name} favored for {body_title} control",
+                "lede": (
+                    f"{party} control probability is {probability * 100:.1f}% with "
+                    f"{mean_count:.1f} projected seats against a {threshold}-seat threshold."
+                    f"{interval}{modeled_note}"
+                ),
+                "winner_name": f"{party} control",
+                "probability": probability,
+                "margin": f"{mean_count - threshold:+.1f} seats vs threshold",
+                "control_body": body,
+                "party": party,
+                "mean_count": mean_count,
+                "threshold": threshold,
+                "p10": p10,
+                "p90": p90,
+                "modeled_seats": modeled,
+                "holdover_seats": holdovers,
+            }
         frame = race_forecasts.filter(pl.col("winner_probability").is_not_null())
         if frame.is_empty():
             return {
@@ -237,6 +337,7 @@ class DiagnosticsReport:
                 "winner_name": "withheld",
                 "probability": None,
                 "margin": "n/a",
+                "control_body": None,
             }
         top = frame.sort("winner_probability", descending=True).row(0, named=True)
         race = frame.filter(pl.col("race_id") == top["race_id"]).sort(
@@ -257,6 +358,7 @@ class DiagnosticsReport:
             "winner_name": winner_name,
             "probability": probability,
             "margin": margin,
+            "control_body": None,
         }
 
     @classmethod
@@ -305,15 +407,13 @@ class DiagnosticsReport:
             party = str(top_control["party"])
             mean_count = float(top_control["seat_count_mean"])
             threshold = int(top_control.get("control_threshold") or 0)
+            holdovers = int(top_control.get("holdover_seats") or 0)
             modeled_seats = int(top_control.get("modeled_seats") or 0)
-            if threshold and modeled_seats and modeled_seats < threshold:
-                control_value = f"{party} {mean_count:.1f}/{modeled_seats}"
-                control_detail = f"National threshold {threshold} is outside this modeled slice."
-            else:
-                control_value = f"{party} {cls._pct(top_control['control_probability'])}"
-                control_detail = (
-                    f"Mean modeled count: {mean_count:.1f}; threshold: {threshold or 'n/a'}."
-                )
+            control_value = f"{party} {cls._pct(top_control['control_probability'])}"
+            control_detail = (
+                f"Mean seats: {mean_count:.1f}; threshold: {threshold or 'n/a'}; "
+                f"modeled: {modeled_seats}; holdovers: {holdovers}."
+            )
             cards.append(
                 cls._insight_card(
                     "Control Readout",
@@ -356,6 +456,86 @@ class DiagnosticsReport:
             "</div>"
         )
 
+    @staticmethod
+    def _priority_plot_cards(
+        plot_manifest: dict[str, list[dict[str, str]]], filenames: list[str]
+    ) -> tuple[str, list[str]]:
+        cards = []
+        used_paths = []
+        for filename in filenames:
+            for entries in plot_manifest.values():
+                match = next(
+                    (entry for entry in entries if str(entry.get("path", "")).endswith(filename)),
+                    None,
+                )
+                if match is None:
+                    continue
+                title = html.escape(str(match.get("title") or filename))
+                path = html.escape(str(match["path"]))
+                used_paths.append(str(match["path"]))
+                cards.append(
+                    '<figure class="plot-card overview-plot-card">'
+                    f'<img src="{path}" alt="{title}" decoding="async">'
+                    f"<figcaption>{title}</figcaption></figure>"
+                )
+                break
+        return "\n".join(cards), used_paths
+
+    @classmethod
+    def _control_table(cls, control_forecasts: pl.DataFrame | None) -> str:
+        if control_forecasts is None or control_forecasts.is_empty():
+            return '<p class="muted">No chamber/control forecast generated.</p>'
+        rows = []
+        for row in control_forecasts.sort("control_probability", descending=True).iter_rows(
+            named=True
+        ):
+            party = str(row.get("party") or "n/a")
+            rows.append(
+                "<tr>"
+                f'<td><span class="party-token {party.lower()}">{html.escape(party)}</span></td>'
+                f"<td>{cls._pct(row.get('control_probability'))}</td>"
+                f"<td>{float(row.get('seat_count_mean') or 0):.1f}</td>"
+                f"<td>{float(row.get('seat_count_p10') or 0):.0f}-"
+                f"{float(row.get('seat_count_p90') or 0):.0f}</td>"
+                "</tr>"
+            )
+        return (
+            '<table class="compact-table control-table"><thead><tr><th>Party</th>'
+            "<th>Control</th><th>Mean</th><th>80% range</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+
+    @classmethod
+    def _closest_race_list(cls, race_forecasts: pl.DataFrame) -> str:
+        if race_forecasts.is_empty() or "winner_probability" not in race_forecasts.columns:
+            return '<p class="muted">No race forecast rows available.</p>'
+        frame = (
+            race_forecasts.filter(pl.col("winner_probability").is_not_null())
+            .with_columns((pl.col("winner_probability") - 0.5).abs().alias("_dist"))
+            .sort("_dist")
+            .head(5)
+        )
+        if frame.is_empty():
+            return '<p class="muted">No competitive races available.</p>'
+        items = []
+        for row in frame.iter_rows(named=True):
+            race_id = str(row.get("race_id") or "")
+            name = str(row.get("name") or row.get("option_id") or "n/a")
+            party = str(row.get("party") or "")
+            probability = cls._pct(row.get("winner_probability"))
+            link = (
+                f'<a href="races/{html.escape(race_id)}.html">{html.escape(race_id)}</a>'
+                if race_id
+                else "n/a"
+            )
+            items.append(
+                "<li>"
+                f"<strong>{html.escape(name)}</strong>"
+                f"<span>{link} · {html.escape(party)} · {probability}</span>"
+                "</li>"
+            )
+        return f'<ol class="closest-list">{"".join(items)}</ol>'
+
     @classmethod
     def _forecast_table(cls, race_forecasts: pl.DataFrame) -> str:
         frame = race_forecasts.sort(["race_id", "winner_probability"], descending=[False, True])
@@ -396,8 +576,18 @@ class DiagnosticsReport:
     def _driver_cards(race_forecasts: pl.DataFrame) -> str:
         if race_forecasts.is_empty():
             return '<p class="muted">No driver rows available.</p>'
+        frame = race_forecasts
+        if "winner_probability" in frame.columns:
+            frame = (
+                frame.filter(pl.col("winner_probability").is_not_null())
+                .with_columns((pl.col("winner_probability") - 0.5).abs().alias("_dist"))
+                .sort("_dist")
+                .head(12)
+            )
+        else:
+            frame = frame.head(12)
         cards = []
-        for row in race_forecasts.sort(["race_id", "option_id"]).iter_rows(named=True):
+        for row in frame.sort(["race_id", "option_id"]).iter_rows(named=True):
             contributions = row.get("component_contributions") or "{}"
             try:
                 parsed = json.loads(str(contributions))
@@ -420,7 +610,10 @@ class DiagnosticsReport:
                 f"<ul>{''.join(parts)}</ul>"
                 "</div>"
             )
-        return f'<div class="driver-grid">{"".join(cards)}</div>'
+        return (
+            '<p class="muted compact-note">Showing driver detail for the most competitive '
+            f'{len(cards)} forecast rows.</p><div class="driver-grid">{"".join(cards)}</div>'
+        )
 
     @staticmethod
     def _reward_grid(rewards: dict[str, Any]) -> str:
@@ -510,7 +703,7 @@ class DiagnosticsReport:
                     continue
                 figures.append(
                     '<figure class="plot-card">'
-                    f'<img src="{path}" alt="{title}">'
+                    f'<img src="{path}" alt="{title}" loading="lazy" decoding="async">'
                     f"<figcaption>{title}</figcaption></figure>"
                 )
             if figures:
@@ -539,7 +732,7 @@ class DiagnosticsReport:
                     path = html.escape(str(entry["path"]))
                     return (
                         '<figure class="plot-card summary-plot-card">'
-                        f'<img src="{path}" alt="{title}">'
+                        f'<img src="{path}" alt="{title}" loading="lazy" decoding="async">'
                         f"<figcaption>{title}</figcaption></figure>"
                     )
         return f'<p class="muted">Top-line plot was not generated: {html.escape(filename)}.</p>'
@@ -584,10 +777,7 @@ class DiagnosticsReport:
         """One-paragraph summary derived from existing run artifacts."""
         lines: list[str] = []
         if control_forecasts is not None and not control_forecasts.is_empty():
-            top = (
-                control_forecasts.sort("control_probability", descending=True)
-                .row(0, named=True)
-            )
+            top = control_forecasts.sort("control_probability", descending=True).row(0, named=True)
             body = str(top.get("control_body") or "control")
             party = str(top.get("party") or "?")
             prob = top.get("control_probability")
@@ -631,9 +821,11 @@ class DiagnosticsReport:
   --ink: #242424;
   --muted: #6b6b6b;
   --rule: #ded9cf;
+  --panel: #fbfaf7;
   --blue: #1f77b4;
   --red: #d62728;
   --gold: #c87922;
+  --green: #3a8f5d;
 }
 * { box-sizing: border-box; }
 body {
@@ -645,15 +837,13 @@ body {
     BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.45;
 }
-.page { max-width: 1180px; margin: 0 auto; padding: 36px 22px 64px; }
+.page { max-width: 1180px; margin: 0 auto; padding: 34px 24px 64px; }
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 240px;
-  gap: 24px;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 18px;
   align-items: stretch;
-  border-bottom: 2px solid var(--ink);
-  padding-bottom: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 .eyebrow {
   text-transform: uppercase;
@@ -663,65 +853,70 @@ body {
   font-weight: 700;
   margin: 0 0 8px;
 }
-h1 { font-size: 54px; line-height: 1; margin: 0; letter-spacing: 0; }
+h1 { font-size: 42px; line-height: 1.08; margin: 0; letter-spacing: 0; max-width: 860px; }
 h2 { font-size: 24px; margin: 0; }
 h3 { margin: 0 0 8px; }
-.lede { color: var(--muted); max-width: 760px; font-size: 18px; }
-.hero-score, .metric-card, .panel {
+.lede { color: var(--muted); max-width: 840px; font-size: 16px; margin-bottom: 0; }
+.hero-score, .metric-card, .panel, .overview-main, .overview-side {
   background: var(--paper);
   border: 1px solid var(--rule);
   box-shadow: 0 1px 0 rgba(0,0,0,.04);
+  border-radius: 8px;
 }
-.hero-score { padding: 22px; display: flex; flex-direction: column; justify-content: center; }
+.hero-score { padding: 20px; display: flex; flex-direction: column; justify-content: center; }
 .score-label, .metric-label {
   color: var(--muted);
   font-size: 12px;
   text-transform: uppercase;
   font-weight: 700;
 }
-.score-value { font-size: 56px; font-weight: 800; line-height: 1; }
+.score-value { font-size: 44px; font-weight: 800; line-height: 1; letter-spacing: 0; }
 .score-subtitle { color: var(--muted); }
-.card-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
-.metric-card { padding: 16px; }
-.metric-card strong { display: block; font-size: 28px; margin: 6px 0; }
-.metric-card span:last-child { color: var(--muted); font-size: 13px; }
-.summary-layout {
+.kpi-strip {
   display: grid;
-  grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);
-  gap: 18px;
-  align-items: stretch;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
   margin-bottom: 18px;
 }
-.summary-cards .card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.summary-cards .insight-strip {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-bottom: 0;
+.metric-card { padding: 15px 16px; min-width: 0; }
+.metric-card strong { display: block; font-size: 26px; margin: 5px 0; letter-spacing: 0; }
+.metric-card span:last-child { color: var(--muted); font-size: 13px; }
+.overview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, .75fr);
+  gap: 18px;
+  align-items: start;
+  margin: 18px 0;
 }
-.summary-plot { min-width: 0; }
-.summary-plot-grid {
+.overview-main, .overview-side { padding: 18px; }
+.overview-plot-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  height: 100%;
 }
-.summary-plot-card { height: 100%; }
-.summary-plot-card img { max-height: 360px; object-fit: contain; }
+.overview-plot-card img { max-height: 360px; object-fit: contain; }
 .insight-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 14px;
 }
-.insight-card { background: #242424; color: #fff; padding: 16px; min-height: 132px; }
+.insight-card {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  padding: 12px;
+  border-radius: 8px;
+}
 .insight-card span {
   display: block;
-  color: #d6d0c5;
+  color: var(--muted);
   font-size: 12px;
   text-transform: uppercase;
   font-weight: 700;
 }
-.insight-card strong { display: block; font-size: 26px; margin: 8px 0; }
-.insight-card p { margin: 0; color: #e8e2d8; font-size: 13px; }
+.insight-card strong { display: block; font-size: 22px; margin: 6px 0; }
+.insight-card p { margin: 0; color: var(--muted); font-size: 13px; }
 .panel { padding: 20px; margin-bottom: 18px; }
 .compact { margin-bottom: 0; }
 .two-col { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; }
@@ -731,6 +926,13 @@ h3 { margin: 0 0 8px; }
   align-items: end;
   gap: 16px;
   margin-bottom: 16px;
+}
+.compact-head { margin-top: 16px; margin-bottom: 10px; }
+.compact-head:first-child { margin-top: 0; }
+.scope-summary {
+  color: var(--muted);
+  margin: 0 0 14px;
+  font-size: 14px;
 }
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
 th {
@@ -742,8 +944,32 @@ th {
 }
 td { border-bottom: 1px solid #eee9df; padding: 10px 8px; vertical-align: top; }
 td span { display: block; color: var(--muted); font-size: 12px; }
+.table-shell {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: auto;
+  background: var(--paper);
+}
+.forecast-shell { max-height: 560px; }
+.forecast-shell thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--paper);
+}
+.compact-table { font-size: 13px; }
+.control-table td:nth-child(2),
 .forecast-table td:nth-child(2),
 .forecast-table td:nth-child(3) { font-size: 20px; font-weight: 700; }
+.party-token {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.party-token.dem { color: var(--blue); background: rgba(31, 119, 180, .12); }
+.party-token.rep { color: var(--red); background: rgba(214, 39, 40, .12); }
 .prob-bar {
   width: 150px;
   height: 10px;
@@ -757,15 +983,40 @@ td span { display: block; color: var(--muted); font-size: 12px; }
   height: 100%;
   background: linear-gradient(90deg, var(--blue), #69a9d8);
 }
+.closest-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 9px;
+}
+.closest-list li {
+  border-bottom: 1px solid #eee9df;
+  padding-bottom: 9px;
+}
+.closest-list li:last-child { border-bottom: none; padding-bottom: 0; }
+.closest-list strong { display: block; font-size: 13px; }
+.closest-list span { color: var(--muted); font-size: 12px; }
 .driver-grid, .reward-grid { display: grid; gap: 10px; }
-.driver-card { border: 1px solid var(--rule); padding: 14px; background: #fbfaf7; }
+.driver-grid { max-height: 520px; overflow: auto; padding-right: 4px; }
+.driver-card {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--panel);
+}
 .driver-card p { color: var(--muted); margin: 0 0 8px; }
 .driver-card ul { margin: 0; padding-left: 18px; }
 .reward-grid { grid-template-columns: repeat(2, 1fr); }
-.reward { border: 1px solid var(--rule); padding: 10px 12px; background: #fbfaf7; }
+.reward {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+}
 .reward strong { display: block; font-size: 13px; }
 .reward span { color: var(--muted); font-size: 12px; }
-.reward.pass { border-left: 4px solid #3a8f5d; }
+.reward.pass { border-left: 4px solid var(--green); }
 .reward.fail { border-left: 4px solid var(--gold); }
 .reward.neutral { border-left: 4px solid #8d8d8d; }
 .callout { background: #fff4dd; border-left: 4px solid var(--gold); padding: 10px 12px; }
@@ -776,24 +1027,42 @@ td span { display: block; color: var(--muted); font-size: 12px; }
   border-radius: 6px;
   padding: 12px 16px;
   margin: 16px 0 22px;
-  color: var(--text);
+  color: var(--ink);
   font-size: 14px;
   line-height: 1.55;
 }
 .benchmark-score { font-size: 42px; font-weight: 800; margin: 0; }
 .plot-section h3 { border-top: 1px solid var(--rule); padding-top: 16px; color: var(--muted); }
 .plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.plot-card { margin: 0; border: 1px solid var(--rule); background: #fbfaf7; padding: 10px; }
-.plot-card img { display: block; width: 100%; height: auto; }
+.plot-card {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px;
+}
+.plot-card img {
+  display: block;
+  width: 100%;
+  max-height: 460px;
+  object-fit: contain;
+  background: #fff;
+}
 .plot-card figcaption { color: var(--muted); font-size: 13px; margin-top: 8px; }
-pre { overflow: auto; background: #fbfaf7; border: 1px solid var(--rule); padding: 12px; }
+pre {
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 12px;
+}
 a { color: var(--blue); }
 .muted { color: var(--muted); }
+.compact-note { font-size: 13px; margin-top: 0; }
 @media (max-width: 860px) {
   h1 { font-size: 38px; }
-  .hero, .two-col, .card-grid, .insight-strip, .plot-grid, .summary-layout,
-  .summary-plot-grid,
-  .summary-cards .card-grid, .summary-cards .insight-strip { grid-template-columns: 1fr; }
+  .hero, .two-col, .kpi-strip, .insight-strip, .plot-grid, .overview-layout,
+  .overview-plot-grid { grid-template-columns: 1fr; }
   .hero-score { max-width: none; }
 }
 """

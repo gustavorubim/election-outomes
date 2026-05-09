@@ -214,6 +214,7 @@ class CycleEvaluationReport:
                 "majority_winner_accuracy": None,
                 "total_upsets": 0,
             }
+
         def safe_mean(column: str) -> float | None:
             if column not in frame.columns:
                 return None
@@ -229,7 +230,8 @@ class CycleEvaluationReport:
             "ec_winner_accuracy": safe_mean("ec_winner_accuracy"),
             "majority_winner_accuracy": safe_mean("ec_winner_accuracy"),
             "total_upsets": int(frame["upset_count"].fill_null(0).sum())
-            if "upset_count" in frame.columns else 0,
+            if "upset_count" in frame.columns
+            else 0,
         }
 
     def _html_report(self, payload: dict[str, Any], frame: pl.DataFrame) -> str:
@@ -250,7 +252,7 @@ class CycleEvaluationReport:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cycle Evaluation {html.escape(str(payload['run_id']))}</title>
+  <title>Cycle Evaluation {html.escape(str(payload["run_id"]))}</title>
   <style>{self._css()}</style>
 </head>
 <body>
@@ -371,11 +373,7 @@ class CycleEvaluationReport:
     def _chamber_label(frame: pl.DataFrame) -> str:
         if frame.is_empty() or "control_body" not in frame.columns:
             return "Cycle"
-        bodies = [
-            value
-            for value in frame["control_body"].drop_nulls().unique().to_list()
-            if value
-        ]
+        bodies = [value for value in frame["control_body"].drop_nulls().unique().to_list() if value]
         if not bodies:
             return "Cycle"
         body = str(bodies[0])
@@ -390,9 +388,7 @@ class CycleEvaluationReport:
         """Probability label for the chamber's headline metric."""
         if frame.is_empty() or "control_body" not in frame.columns:
             return "Winner"
-        bodies = [
-            value for value in frame["control_body"].drop_nulls().unique().to_list() if value
-        ]
+        bodies = [value for value in frame["control_body"].drop_nulls().unique().to_list() if value]
         if not bodies:
             return "Winner"
         body = str(bodies[0])
@@ -407,9 +403,7 @@ class CycleEvaluationReport:
         """Per-race accuracy label that matches the scenario's geography unit."""
         if frame.is_empty() or "control_body" not in frame.columns:
             return "Race"
-        bodies = [
-            value for value in frame["control_body"].drop_nulls().unique().to_list() if value
-        ]
+        bodies = [value for value in frame["control_body"].drop_nulls().unique().to_list() if value]
         if not bodies:
             return "Race"
         body = str(bodies[0])
@@ -515,13 +509,9 @@ class CycleEvaluationReport:
             f"({first}-{last}); majority threshold {threshold_label}."
         ]
         if majority_acc is not None:
-            parts.append(
-                f"Majority winner correct on {float(majority_acc) * 100:.0f}% of cycles."
-            )
+            parts.append(f"Majority winner correct on {float(majority_acc) * 100:.0f}% of cycles.")
         if race_acc is not None:
-            parts.append(
-                f"Per-race accuracy averaged {float(race_acc) * 100:.1f}%."
-            )
+            parts.append(f"Per-race accuracy averaged {float(race_acc) * 100:.1f}%.")
         if brier is not None:
             parts.append(f"Mean Brier {float(brier):.4f} (lower is better).")
         return " ".join(parts)

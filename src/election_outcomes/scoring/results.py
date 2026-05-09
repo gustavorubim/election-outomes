@@ -10,6 +10,14 @@ import matplotlib
 import numpy as np
 import polars as pl
 
+from election_outcomes.reports._style import (
+    NEUTRAL,
+    SIZE_PANEL,
+    apply_rcparams,
+    party_color,
+    report_css,
+    style_axis,
+)
 from election_outcomes.storage.io import write_json, write_parquet, write_text
 
 matplotlib.use("Agg")
@@ -468,6 +476,7 @@ class ResultComparator:
     def _write_plots(
         self, comparison: pl.DataFrame, output_dir: Path
     ) -> dict[str, list[dict[str, str]]]:
+        apply_rcparams()
         plot_dir = output_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
         manifest: dict[str, list[dict[str, str]]] = {"comparison": []}
@@ -484,7 +493,12 @@ class ResultComparator:
         self._add_plot(
             manifest,
             self._actual_winner_probability_plot(comparison, plot_dir),
-            "Actual-winner probabilities",
+            "Actual-winner probability histogram",
+        )
+        self._add_plot(
+            manifest,
+            self._actual_winner_swarm_plot(comparison, plot_dir),
+            "Actual-winner probability swarm",
         )
         self._add_plot(
             manifest,
@@ -505,17 +519,36 @@ class ResultComparator:
             return None
         actual = frame["actual_vote_share"].to_numpy()
         predicted = frame["vote_share_mean"].to_numpy()
-        labels = frame["option_id"].to_list()
-        fig, ax = plt.subplots(figsize=(7, 6), dpi=140)
-        ax.scatter(actual, predicted, color="#4c78a8", s=70)
-        ax.plot([0, 1], [0, 1], linestyle="--", color="#777777", linewidth=1)
-        for x_value, y_value, label in zip(actual, predicted, labels, strict=True):
-            ax.annotate(str(label).split("-")[-1], (x_value, y_value), fontsize=8)
+        colors = [
+            party_color(row.get("party"), default="#4c78a8") for row in frame.iter_rows(named=True)
+        ]
+        fig, ax = plt.subplots(figsize=SIZE_PANEL)
+        ax.scatter(
+            actual,
+            predicted,
+            color=colors,
+            s=34,
+            alpha=0.72,
+            edgecolors="white",
+            linewidths=0.35,
+        )
+        ax.plot([0, 1], [0, 1], linestyle="--", color=NEUTRAL["muted"], linewidth=1)
+        label_frame = frame.sort("absolute_vote_share_error", descending=True).head(8)
+        for row in label_frame.iter_rows(named=True):
+            ax.annotate(
+                str(row.get("geography") or row.get("race_id") or row.get("option_id")),
+                (float(row["actual_vote_share"]), float(row["vote_share_mean"])),
+                xytext=(5, 4),
+                textcoords="offset points",
+                fontsize=7,
+                color=NEUTRAL["muted"],
+            )
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.set_xlabel("Actual vote share")
         ax.set_ylabel("Forecast mean vote share")
         ax.set_title("Forecast vs Actual Vote Share")
+        style_axis(ax)
         return self._save(fig, plot_dir / "vote_share_forecast_vs_actual.png")
 
     def _winner_probability_plot(self, comparison: pl.DataFrame, plot_dir: Path) -> Path | None:
@@ -524,15 +557,27 @@ class ResultComparator:
             return None
         x_values = frame["winner_probability"].to_numpy()
         y_values = frame["actual_winner"].cast(pl.Int8).to_numpy()
-        colors = np.where(y_values == 1, "#59a14f", "#e15759")
-        fig, ax = plt.subplots(figsize=(7, 4), dpi=140)
-        ax.scatter(x_values, y_values, color=colors, s=80)
+        jitter = np.linspace(-0.055, 0.055, len(y_values)) if len(y_values) else np.array([])
+        if len(jitter):
+            jitter = np.roll(jitter, len(jitter) // 3)
+        colors = np.where(y_values == 1, NEUTRAL["win"], NEUTRAL["loss"])
+        fig, ax = plt.subplots(figsize=SIZE_PANEL)
+        ax.scatter(
+            x_values,
+            y_values + jitter,
+            color=colors,
+            s=34,
+            alpha=0.72,
+            edgecolors="white",
+            linewidths=0.35,
+        )
+        ax.axvline(0.5, color=NEUTRAL["muted"], linestyle="--", linewidth=1)
         ax.set_xlim(0, 1)
         ax.set_ylim(-0.15, 1.15)
         ax.set_xlabel("Forecast winner probability")
-        ax.set_ylabel("Actual winner")
-        ax.set_yticks([0, 1])
+        ax.set_yticks([0, 1], ["Lost", "Won"])
         ax.set_title("Winner Probability vs Actual Outcome")
+        style_axis(ax)
         return self._save(fig, plot_dir / "winner_probability_vs_actual.png")
 
     def _actual_winner_probability_plot(
@@ -546,24 +591,87 @@ class ResultComparator:
         )
         if frame.is_empty():
             return None
-        labels = [
-            f"{row['geography'] or row['race_id']}\n{row['actual_winner_party']}"
-            for row in frame.iter_rows(named=True)
+        correct = frame.filter(pl.col("race_winner_correct"))[
+            "actual_winner_probability"
+        ].to_numpy()
+        missed = frame.filter(~pl.col("race_winner_correct"))[
+            "actual_winner_probability"
+        ].to_numpy()
+        fig, ax = plt.subplots(figsize=SIZE_PANEL)
+        ax.hist(
+            [correct, missed],
+            bins=np.linspace(0, 1, 11),
+            stacked=True,
+            color=[NEUTRAL["win"], NEUTRAL["loss"]],
+            label=["Called winner", "Missed winner"],
+            edgecolor="white",
+            linewidth=0.8,
+        )
+        ax.axvline(0.5, color=NEUTRAL["muted"], linestyle="--", linewidth=1)
+        callout_lines = [
+            f"{row.get('geography') or row['race_id']}: "
+            f"{float(row['actual_winner_probability']):.0%}"
+            for row in frame.head(8).iter_rows(named=True)
         ]
-        values = frame["actual_winner_probability"].to_list()
-        colors = [
-            "#59a14f" if bool(row["race_winner_correct"]) else "#e15759"
-            for row in frame.iter_rows(named=True)
-        ]
-        fig, ax = plt.subplots(figsize=(8, max(3.8, len(labels) * 0.46)), dpi=140)
-        ax.barh(labels, values, color=colors)
-        ax.axvline(0.5, color="#777777", linestyle="--", linewidth=1)
-        for idx, value in enumerate(values):
-            ax.text(min(0.98, float(value) + 0.02), idx, f"{float(value):.1%}", va="center")
+        if callout_lines:
+            ax.text(
+                0.03,
+                0.95,
+                "Lowest-confidence winners\n" + "\n".join(callout_lines),
+                transform=ax.transAxes,
+                va="top",
+                fontsize=8,
+                color=NEUTRAL["ink"],
+                bbox={
+                    "boxstyle": "round,pad=0.35",
+                    "facecolor": "#ffffff",
+                    "edgecolor": NEUTRAL["rule"],
+                    "alpha": 0.92,
+                },
+            )
         ax.set_xlim(0, 1)
         ax.set_xlabel("Forecast probability assigned to actual winner")
-        ax.set_title("Actual-Winner Probability by Race")
+        ax.set_ylabel("Race count")
+        ax.set_title("Actual-Winner Probability Distribution")
+        ax.legend(loc="upper right")
+        style_axis(ax)
         return self._save(fig, plot_dir / "actual_winner_probabilities.png")
+
+    def _actual_winner_swarm_plot(self, comparison: pl.DataFrame, plot_dir: Path) -> Path | None:
+        race_outcomes = self._race_outcome_frame(comparison)
+        if race_outcomes.is_empty():
+            return None
+        frame = race_outcomes.filter(pl.col("actual_winner_probability").is_not_null()).sort(
+            "actual_winner_probability"
+        )
+        if frame.is_empty():
+            return None
+        values = frame["actual_winner_probability"].to_numpy()
+        y_values = np.zeros_like(values, dtype=float)
+        if values.size:
+            y_values = ((np.arange(values.size) % 17) - 8) / 120.0
+        colors = [
+            NEUTRAL["win"] if bool(row["race_winner_correct"]) else NEUTRAL["loss"]
+            for row in frame.iter_rows(named=True)
+        ]
+        fig, ax = plt.subplots(figsize=(7.6, 3.2))
+        ax.scatter(
+            values,
+            y_values,
+            color=colors,
+            s=26,
+            alpha=0.74,
+            edgecolors="white",
+            linewidths=0.35,
+        )
+        ax.axvline(0.5, color=NEUTRAL["muted"], linestyle="--", linewidth=1)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(-0.12, 0.12)
+        ax.set_yticks([])
+        ax.set_xlabel("Forecast probability assigned to actual winner")
+        ax.set_title("Actual-Winner Probability Swarm")
+        style_axis(ax, grid_axis="x")
+        return self._save(fig, plot_dir / "actual_winner_probability_swarm.png")
 
     def _largest_misses_plot(self, comparison: pl.DataFrame, plot_dir: Path) -> Path | None:
         frame = self._largest_miss_frame(comparison, limit=12)
@@ -579,12 +687,13 @@ class ResultComparator:
             "#e15759" if bool(row.get("actual_winner")) else "#4c78a8"
             for row in frame.iter_rows(named=True)
         ]
-        fig, ax = plt.subplots(figsize=(8.4, max(4.0, len(labels) * 0.5)), dpi=140)
+        fig, ax = plt.subplots(figsize=(7.6, 5.0))
         ax.barh(labels, values, color=colors)
         for idx, value in enumerate(values):
             ax.text(float(value) + 0.002, idx, f"{float(value):.1%}", va="center", fontsize=9)
         ax.set_xlabel("Absolute vote-share error")
         ax.set_title("Largest Vote-Share Misses")
+        style_axis(ax, grid_axis="x")
         return self._save(fig, plot_dir / "largest_vote_share_misses.png")
 
     @staticmethod
@@ -596,7 +705,6 @@ class ResultComparator:
 
     @staticmethod
     def _html_report(summary: dict[str, Any], comparison: pl.DataFrame) -> str:
-        rows = ""
         row_columns = [
             "race_id",
             "option_id",
@@ -609,10 +717,11 @@ class ResultComparator:
             "race_winner_correct",
             "absolute_vote_share_error",
         ]
+        present = [column for column in row_columns if column in comparison.columns]
+        option_rows = ""
         if not comparison.is_empty():
-            present = [column for column in row_columns if column in comparison.columns]
             for row in comparison.select(present).iter_rows(named=True):
-                rows += (
+                option_rows += (
                     "<tr>"
                     + "".join(
                         f"<td>{html.escape(ResultComparator._format_cell(value))}</td>"
@@ -620,31 +729,428 @@ class ResultComparator:
                     )
                     + "</tr>"
                 )
-        plot_figures = "".join(
-            '<figure><img src="'
-            f'{html.escape(entry["path"])}" width="800" alt="{html.escape(entry["title"])}">'
-            f"<figcaption>{html.escape(entry['title'])}</figcaption></figure>"
-            for entry in summary.get("plot_manifest", {}).get("comparison", [])
-        )
         header_cells = "".join(
-            f"<th>{html.escape(column.replace('_', ' ').title())}</th>" for column in row_columns
+            f"<th>{html.escape(column.replace('_', ' ').title())}</th>" for column in present
+        )
+        race_outcomes = ResultComparator._race_outcome_frame(comparison)
+        race_rows = ""
+        if not race_outcomes.is_empty():
+            for row in race_outcomes.sort(["office_type", "geography", "race_id"]).iter_rows(
+                named=True
+            ):
+                race_rows += ResultComparator._race_outcome_row(row)
+        miss_rows = "".join(
+            ResultComparator._largest_miss_row(row) for row in summary.get("largest_misses", [])
+        )
+        filters = summary.get("filters", {})
+        filter_parts = [
+            f"{key.replace('_', ' ')}: {value}"
+            for key, value in filters.items()
+            if value is not None
+        ]
+        filter_text = " | ".join(filter_parts) if filter_parts else "all configured races"
+        metrics = "\n".join(
+            [
+                ResultComparator._metric_card(
+                    "Races",
+                    ResultComparator._format_number(summary.get("race_count"), digits=0),
+                    f"{ResultComparator._format_number(summary.get('row_count'), digits=0)} rows",
+                ),
+                ResultComparator._metric_card(
+                    "Winner accuracy",
+                    ResultComparator._format_pct(summary.get("winner_accuracy")),
+                    "race-level called winner",
+                ),
+                ResultComparator._metric_card(
+                    "Mean abs. error",
+                    ResultComparator._format_pct(summary.get("mean_absolute_vote_share_error")),
+                    "option vote-share error",
+                ),
+                ResultComparator._metric_card(
+                    "Brier score",
+                    ResultComparator._format_number(summary.get("brier_score"), digits=3),
+                    "winner-probability loss",
+                ),
+                ResultComparator._metric_card(
+                    "Upsets",
+                    ResultComparator._format_number(summary.get("upset_count"), digits=0),
+                    "actual winners below 50%",
+                ),
+            ]
+        )
+        plot_figures = ResultComparator._plot_figures(summary)
+        summary_json = html.escape(json.dumps(summary, indent=2, sort_keys=True))
+        option_table = (
+            f"""
+<div class="table-shell audit-table">
+<table>
+<thead><tr>{header_cells}</tr></thead>
+<tbody>{option_rows}</tbody>
+</table>
+</div>
+"""
+            if header_cells
+            else '<p class="muted-copy">No option-level rows were matched.</p>'
         )
         return f"""<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Result Comparison</title></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Result Comparison</title>
+<style>
+{report_css()}
+{ResultComparator._comparison_css()}
+</style>
+</head>
 <body>
-<h1>Result Comparison: {html.escape(str(summary["comparison_id"]))}</h1>
-<h2>Summary</h2>
-<pre>{html.escape(json.dumps(summary, indent=2, sort_keys=True))}</pre>
-<h2>Plots</h2>
+<main class="container result-comparison">
+<header class="hero comparison-hero">
+<p class="eyebrow">Forecast vs actual</p>
+<h1>{html.escape(str(summary["comparison_id"]))}</h1>
+<p class="subtitle">
+Compared {html.escape(ResultComparator._format_number(summary.get("race_count"), digits=0))}
+races across {html.escape(filter_text)} using the forecast snapshot and curated actuals.
+</p>
+</header>
+
+<section class="result-band metric-band" aria-label="Comparison summary">
+<div class="metric-grid">
+{metrics}
+</div>
+</section>
+
+<section class="result-band">
+<div class="band-header">
+<div>
+<p class="eyebrow">Model behavior</p>
+<h2>Calibration And Miss Patterns</h2>
+</div>
+<p class="band-note">
+Distribution, swarm, and miss panels show calibration and error concentration.
+</p>
+</div>
+<div class="result-plot-grid">
 {plot_figures}
-<h2>Rows</h2>
+</div>
+</section>
+
+<section class="result-band">
+<div class="band-header">
+<div>
+<p class="eyebrow">Race detail</p>
+<h2>Race-By-Race Outcomes</h2>
+</div>
+<p class="band-note">Sorted by office, geography, and race id.</p>
+</div>
+<div class="table-shell race-table">
 <table>
-<thead><tr>{header_cells}</tr></thead>
-<tbody>{rows}</tbody>
+<thead>
+<tr>
+<th>Race</th>
+<th>Predicted winner</th>
+<th>Actual winner</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>{race_rows}</tbody>
 </table>
+</div>
+</section>
+
+<section class="result-band">
+<div class="band-header">
+<div>
+<p class="eyebrow">Where to inspect first</p>
+<h2>Largest Vote-Share Misses</h2>
+</div>
+</div>
+<div class="table-shell compact-table">
+<table>
+<thead>
+<tr>
+<th>Race</th>
+<th>Option</th>
+<th>Party</th>
+<th>Forecast</th>
+<th>Actual</th>
+<th>Error</th>
+</tr>
+</thead>
+<tbody>{miss_rows}</tbody>
+</table>
+</div>
+</section>
+
+<section class="result-band audit-band">
+<details>
+<summary>Summary JSON</summary>
+<pre>{summary_json}</pre>
+</details>
+<details>
+<summary>Option-level comparison rows</summary>
+{option_table}
+</details>
+</section>
+</main>
 </body>
 </html>
+"""
+
+    @staticmethod
+    def _plot_figures(summary: dict[str, Any]) -> str:
+        figures = []
+        for entry in summary.get("plot_manifest", {}).get("comparison", []):
+            title = str(entry["title"])
+            path = str(entry["path"])
+            css_class = "plot-card"
+            if "Largest" in title:
+                css_class += " plot-card-wide"
+            figures.append(
+                f'<figure class="{css_class}">'
+                f'<img src="{html.escape(path)}" alt="{html.escape(title)}" loading="lazy">'
+                f"<figcaption>{html.escape(title)}</figcaption>"
+                "</figure>"
+            )
+        return "\n".join(figures)
+
+    @staticmethod
+    def _metric_card(label: str, value: str, detail: str) -> str:
+        return (
+            '<article class="metric-card">'
+            f'<span class="label">{html.escape(label)}</span>'
+            f'<strong class="value">{html.escape(value)}</strong>'
+            f'<span class="detail">{html.escape(detail)}</span>'
+            "</article>"
+        )
+
+    @staticmethod
+    def _race_outcome_row(row: dict[str, Any]) -> str:
+        geography = row.get("geography") or row.get("race_id")
+        race_meta = " | ".join(
+            str(value)
+            for value in [row.get("office_type"), row.get("geography_type"), row.get("seats")]
+            if value not in {None, ""}
+        )
+        correct = bool(row.get("race_winner_correct"))
+        result_class = "win" if correct else "loss"
+        result_text = "Correct" if correct else "Miss"
+        return (
+            "<tr>"
+            "<td>"
+            f"<strong>{html.escape(str(geography))}</strong>"
+            f'<span class="cell-note">{html.escape(str(row.get("race_id") or ""))}</span>'
+            f'<span class="cell-note">{html.escape(race_meta)}</span>'
+            "</td>"
+            f"<td>{ResultComparator._winner_label(row, 'predicted')}</td>"
+            f"<td>{ResultComparator._winner_label(row, 'actual')}</td>"
+            f'<td><span class="pill {result_class}">{result_text}</span></td>'
+            "</tr>"
+        )
+
+    @staticmethod
+    def _largest_miss_row(row: dict[str, Any]) -> str:
+        race = row.get("geography") or row.get("race_id")
+        option = row.get("name") or row.get("option_id")
+        return (
+            "<tr>"
+            f"<td>{html.escape(str(race))}</td>"
+            f"<td>{html.escape(str(option))}</td>"
+            f"<td>{ResultComparator._party_pill(row.get('party'))}</td>"
+            f"<td>{html.escape(ResultComparator._format_pct(row.get('vote_share_mean')))}</td>"
+            f"<td>{html.escape(ResultComparator._format_pct(row.get('actual_vote_share')))}</td>"
+            "<td>"
+            f"{html.escape(ResultComparator._format_pct(row.get('absolute_vote_share_error')))}"
+            "</td>"
+            "</tr>"
+        )
+
+    @staticmethod
+    def _winner_label(row: dict[str, Any], prefix: str) -> str:
+        name = row.get(f"{prefix}_winner_name") or row.get(f"{prefix}_winner_option_id") or "n/a"
+        party = row.get(f"{prefix}_winner_party")
+        probability = ResultComparator._format_pct(row.get(f"{prefix}_winner_probability"))
+        return (
+            '<div class="winner-cell">'
+            f"<strong>{html.escape(str(name))}</strong>"
+            f"{ResultComparator._party_pill(party)}"
+            f'<span class="cell-note">{html.escape(probability)} probability</span>'
+            "</div>"
+        )
+
+    @staticmethod
+    def _party_pill(party: Any) -> str:
+        if party is None:
+            return '<span class="pill neutral">n/a</span>'
+        party_text = str(party)
+        party_class = party_text.lower() if party_text.upper() in {"DEM", "REP"} else "neutral"
+        return f'<span class="pill {party_class}">{html.escape(party_text)}</span>'
+
+    @staticmethod
+    def _format_pct(value: Any) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if np.isnan(numeric):
+            return "n/a"
+        return f"{numeric:.1%}"
+
+    @staticmethod
+    def _format_number(value: Any, *, digits: int = 1) -> str:
+        if value is None:
+            return "n/a"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if np.isnan(numeric):
+            return "n/a"
+        if digits == 0:
+            return f"{numeric:,.0f}"
+        return f"{numeric:,.{digits}f}"
+
+    @staticmethod
+    def _comparison_css() -> str:
+        return """
+.result-comparison { max-width: 1180px; }
+.comparison-hero { margin-bottom: 20px; }
+.result-band { margin: 24px 0 34px; }
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+.metric-card {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 15px 16px;
+  min-width: 0;
+}
+.metric-card .label {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-weight: 700;
+}
+.metric-card .value {
+  display: block;
+  margin-top: 4px;
+  font-size: 27px;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+.metric-card .detail {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.band-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.band-header h2 { margin: 0; }
+.band-note {
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 330px;
+  margin: 0;
+  text-align: right;
+}
+.result-plot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.plot-card {
+  margin: 0;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 12px 12px 14px;
+}
+.plot-card-wide { grid-column: 1 / -1; }
+.plot-card img {
+  width: 100%;
+  max-height: 430px;
+  object-fit: contain;
+  display: block;
+  background: #fff;
+  border-radius: 4px;
+}
+.plot-card-wide img { max-height: 480px; }
+.plot-card figcaption {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.table-shell {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: auto;
+}
+.race-table { max-height: 520px; }
+.compact-table { max-height: 360px; }
+.audit-table { max-height: 440px; margin-top: 12px; }
+.table-shell thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
+}
+.winner-cell {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.winner-cell strong { min-width: 120px; }
+.cell-note {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.muted-copy { color: var(--muted); }
+.audit-band details {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.audit-band summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.audit-band pre {
+  margin: 12px 0 0;
+  overflow-x: auto;
+  background: #f0eee6;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+}
+@media (max-width: 980px) {
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .result-plot-grid { grid-template-columns: 1fr; }
+  .plot-card-wide { grid-column: auto; }
+}
+@media (max-width: 640px) {
+  .metric-grid { grid-template-columns: 1fr; }
+  .band-header { display: block; }
+  .band-note { text-align: left; margin-top: 6px; }
+}
 """
 
     @staticmethod

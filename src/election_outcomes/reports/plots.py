@@ -61,9 +61,7 @@ class PlotGenerator:
         self._add(
             manifest,
             "distribution",
-            self._seat_count_histogram(
-                plot_dir, race_catalog, forecast_draws, control_forecasts
-            ),
+            self._seat_count_histogram(plot_dir, race_catalog, forecast_draws, control_forecasts),
             "Seat-count distribution per party",
         )
         self._add(
@@ -298,21 +296,28 @@ class PlotGenerator:
         frame = race_forecasts.filter(pl.col("winner_probability").is_not_null())
         if frame.is_empty():
             return None
-        frame = frame.sort("winner_probability", descending=True)
+        frame = (
+            frame.sort(["race_id", "winner_probability"], descending=[False, True])
+            .group_by("race_id", maintain_order=True)
+            .head(1)
+            .with_columns((pl.col("winner_probability") - 0.5).abs().alias("_distance"))
+            .sort("_distance")
+            .head(24)
+        )
         labels = [self._option_label(row) for row in frame.iter_rows(named=True)]
         values = frame["winner_probability"].to_list()
         colors = [
             PARTY_COLORS.get(str(row["party"]), "#f28e2b") for row in frame.iter_rows(named=True)
         ]
-        fig, ax = plt.subplots(figsize=(9.5, max(4.8, len(labels) * 0.55)), dpi=150)
+        fig, ax = plt.subplots(figsize=(8.4, 6.0), dpi=150)
         ax.barh(labels, values, color=colors)
         ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=1)
         for idx, value in enumerate(values):
             x = min(0.98, float(value) + 0.025)
-            ax.text(x, idx, f"{float(value):.1%}", va="center", fontsize=10)
+            ax.text(x, idx, f"{float(value):.1%}", va="center", fontsize=8)
         ax.set_xlim(0, 1)
         ax.set_xlabel("Winner probability")
-        ax.set_title("Race-Level Winner Probabilities", loc="left", fontweight="bold")
+        ax.set_title("Most Competitive Race Winner Probabilities", loc="left", fontweight="bold")
         ax.xaxis.set_major_formatter(PercentFormatter(1.0))
         ax.invert_yaxis()
         self._style_axis(ax)
@@ -323,12 +328,16 @@ class PlotGenerator:
         required = {"vote_share_mean", "vote_share_p05", "vote_share_p95"}
         if frame.is_empty() or not required.issubset(set(frame.columns)):
             return None
-        sorted_frame = frame.sort("vote_share_mean", descending=True)
+        sorted_frame = (
+            frame.with_columns((pl.col("vote_share_mean") - 0.5).abs().alias("_distance"))
+            .sort("_distance")
+            .head(24)
+        )
         labels = [self._option_label(row) for row in sorted_frame.iter_rows(named=True)]
         mean = np.array(sorted_frame["vote_share_mean"].to_list())
         low = np.array(sorted_frame["vote_share_p05"].to_list())
         high = np.array(sorted_frame["vote_share_p95"].to_list())
-        fig, ax = plt.subplots(figsize=(9.5, max(4.8, len(labels) * 0.55)), dpi=150)
+        fig, ax = plt.subplots(figsize=(8.4, 6.0), dpi=150)
         for idx, row in enumerate(sorted_frame.iter_rows(named=True)):
             color = PARTY_COLORS.get(str(row.get("party")), "#2f4b7c")
             ax.errorbar(
@@ -347,7 +356,7 @@ class PlotGenerator:
                 labels[idx],
                 f"{float(mean[idx]):.1%}",
                 va="center",
-                fontsize=10,
+                fontsize=8,
                 color=TEXT_COLOR,
             )
         ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=1)
@@ -355,7 +364,7 @@ class PlotGenerator:
         xmax = min(1, max(float(high.max()) + 0.07, 0.52))
         ax.set_xlim(xmin, xmax)
         ax.set_xlabel("Projected vote share with 90% interval")
-        ax.set_title("Vote-Share Projection Intervals", loc="left", fontweight="bold")
+        ax.set_title("Most Competitive Vote-Share Intervals", loc="left", fontweight="bold")
         ax.xaxis.set_major_formatter(PercentFormatter(1.0))
         ax.invert_yaxis()
         self._style_axis(ax)
@@ -411,18 +420,22 @@ class PlotGenerator:
     ) -> Path | None:
         if ecosystem_forecasts.is_empty():
             return None
-        labels = ecosystem_forecasts["race_id"].to_list()
-        recount = ecosystem_forecasts["recount_probability"].to_list()
-        frame = ecosystem_forecasts.sort("recount_probability", descending=True)
+        frame = ecosystem_forecasts.sort("recount_probability", descending=True).head(24)
         labels = frame["race_id"].to_list()
         recount = frame["recount_probability"].to_list()
-        fig, ax = plt.subplots(figsize=(9.5, max(4.8, len(labels) * 0.55)), dpi=150)
+        fig, ax = plt.subplots(figsize=(8.4, 6.0), dpi=150)
         ax.barh(labels, recount, color="#76b7b2")
         for idx, value in enumerate(recount):
-            ax.text(min(0.98, float(value) + 0.02), idx, f"{float(value):.1%}", va="center")
+            ax.text(
+                min(0.98, float(value) + 0.02),
+                idx,
+                f"{float(value):.1%}",
+                va="center",
+                fontsize=8,
+            )
         ax.set_xlim(0, 1)
         ax.set_xlabel("Recount probability")
-        ax.set_title("Recount Risk by Race", loc="left", fontweight="bold")
+        ax.set_title("Highest Recount-Risk Races", loc="left", fontweight="bold")
         ax.xaxis.set_major_formatter(PercentFormatter(1.0))
         ax.text(
             0,
@@ -933,11 +946,7 @@ class PlotGenerator:
         control_forecasts: pl.DataFrame,
     ) -> Path | None:
         """Histogram of total seats per party across draws with majority threshold."""
-        if (
-            race_catalog.is_empty()
-            or forecast_draws.is_empty()
-            or control_forecasts.is_empty()
-        ):
+        if race_catalog.is_empty() or forecast_draws.is_empty() or control_forecasts.is_empty():
             return None
         catalog = race_catalog.select(["race_id", "control_body", "seats"])
         joined = forecast_draws.join(catalog, on="race_id", how="inner").filter(
@@ -1020,9 +1029,7 @@ class PlotGenerator:
         if candidates.is_empty():
             return None
         ranked = (
-            candidates.with_columns(
-                (pl.col("winner_probability") - 0.5).abs().alias("_dist")
-            )
+            candidates.with_columns((pl.col("winner_probability") - 0.5).abs().alias("_dist"))
             .group_by("race_id", maintain_order=True)
             .agg(pl.col("_dist").min().alias("_dist"))
             .sort("_dist")
@@ -1124,15 +1131,8 @@ class PlotGenerator:
                 )
         if not rows:
             return None
-        frame = (
-            pl.DataFrame(rows)
-            .sort("pivotal_rate", descending=True)
-            .head(10)
-            .reverse()
-        )
-        labels = [
-            f"{row['race_id']} ({row['party']})" for row in frame.iter_rows(named=True)
-        ]
+        frame = pl.DataFrame(rows).sort("pivotal_rate", descending=True).head(10).reverse()
+        labels = [f"{row['race_id']} ({row['party']})" for row in frame.iter_rows(named=True)]
         values = frame["pivotal_rate"].to_list()
         colors = [
             PARTY_COLORS.get(str(row["party"]).upper(), ACCENT_FALLBACK)
@@ -1214,9 +1214,10 @@ class PlotGenerator:
             if not isinstance(info, dict):
                 continue
             try:
-                contribution = float(info.get("weighted_marginal_win_probability", 0.0)) - float(
-                    info.get("weight", 0.0)
-                ) * 0.5
+                contribution = (
+                    float(info.get("weighted_marginal_win_probability", 0.0))
+                    - float(info.get("weight", 0.0)) * 0.5
+                )
             except (TypeError, ValueError):
                 continue
             components.append(component)
@@ -1245,9 +1246,7 @@ class PlotGenerator:
             ax.spines[spine].set_visible(False)
         ax.spines["bottom"].set_color(GRID_COLOR)
 
-    def _reliability_diagram_with_band(
-        self, plot_dir: Path, frame: pl.DataFrame
-    ) -> Path | None:
+    def _reliability_diagram_with_band(self, plot_dir: Path, frame: pl.DataFrame) -> Path | None:
         """Calibration curve with Wilson confidence band and forecast histogram."""
         if frame.is_empty() or "ensemble_probability" not in frame.columns:
             return None

@@ -173,6 +173,13 @@ Open the comparison report:
 open artifacts/runs/2024-presidential/comparisons/2024-presidential-actuals/result_comparison.html
 ```
 
+The comparison report opens with a KPI strip, fixed-size calibration plots, an
+actual-winner probability histogram, an actual-winner probability swarm, compact
+largest-miss rows, and collapsed audit tables for the full summary JSON and
+option-level comparison rows. The same layout is used for president, Senate, and
+House comparisons so large chamber dashboards do not create oversized
+race-by-race canvases.
+
 Use this benchmark to inspect misses and calibration. Do not tune directly against 2024
 actuals; use cross-cycle evidence and rolling-origin backtests.
 
@@ -361,8 +368,10 @@ for chamber, path in [
 
 Important forecast artifacts:
 
-- `diagnostics.html`: top-line summary, EC distribution and swarm, model drivers, trust
-  gates, backtest snapshot, Silver/FiveThirtyEight methodology benchmark, and plots.
+- `diagnostics.html`: executive forecast dashboard with an office-aware headline
+  (Electoral College for president, chamber control for Senate/House), KPI strip,
+  fixed-size overview plots, model drivers, trust gates, backtest snapshot,
+  Silver/FiveThirtyEight methodology benchmark, and compact plot grids.
 - `race_forecasts.parquet`: per-option probabilities, vote-share intervals, drivers,
   data-quality flags, and lineage hashes.
 - `forecast_draws.parquet`: race-level posterior-style simulation draws.

@@ -326,8 +326,12 @@ def test_presidential_result_comparison(tmp_path: Path) -> None:
     assert (comparison_dir / "narrative.md").exists()
     assert (comparison_dir / "race_outcomes.parquet").exists()
     assert (comparison_dir / "largest_misses.parquet").exists()
+    html_doc = (comparison_dir / "result_comparison.html").read_text(encoding="utf-8")
+    assert "result-plot-grid" in html_doc
+    assert "Race-By-Race Outcomes" in html_doc
     assert (comparison_dir / "plots" / "vote_share_forecast_vs_actual.png").stat().st_size > 0
     assert (comparison_dir / "plots" / "actual_winner_probabilities.png").stat().st_size > 0
+    assert (comparison_dir / "plots" / "actual_winner_probability_swarm.png").stat().st_size > 0
     assert (comparison_dir / "plots" / "largest_vote_share_misses.png").stat().st_size > 0
     assert {
         "actual_winner_probability",
@@ -418,8 +422,10 @@ def test_presidential_scenario_writes_ec_plot_and_latest_backtest_artifacts(
     assert (out_dir / "plots" / "electoral_college_chain_traces.png").stat().st_size > 0
     assert (out_dir / "plots" / "topline_electoral_swarm.png").stat().st_size > 0
     diagnostics = (out_dir / "diagnostics.html").read_text(encoding="utf-8")
+    assert "kpi-strip" in diagnostics
+    assert "overview-plot-grid" in diagnostics
     assert diagnostics.index("plots/topline_electoral_swarm.png") < diagnostics.index(
-        "Distribution And Probability View"
+        "Where The Forecast Lives"
     )
     assert payload["row_count"] >= 30
     assert payload["sample_size_too_small"] is False

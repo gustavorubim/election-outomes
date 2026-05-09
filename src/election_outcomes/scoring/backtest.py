@@ -260,9 +260,7 @@ class BacktestRunner:
         }
 
     @staticmethod
-    def _restrict_to_era(
-        train_catalog: pl.DataFrame, test_catalog: pl.DataFrame
-    ) -> pl.DataFrame:
+    def _restrict_to_era(train_catalog: pl.DataFrame, test_catalog: pl.DataFrame) -> pl.DataFrame:
         """Drop training rows from a different redistricting era than the holdout cycle.
 
         Non-house scenarios don't carry a `redistricting_era` column or have it null,
@@ -277,8 +275,7 @@ class BacktestRunner:
         if not eras:
             return train_catalog
         return train_catalog.filter(
-            pl.col("redistricting_era").is_null()
-            | pl.col("redistricting_era").is_in(eras)
+            pl.col("redistricting_era").is_null() | pl.col("redistricting_era").is_in(eras)
         )
 
     @staticmethod

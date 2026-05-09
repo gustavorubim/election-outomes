@@ -718,8 +718,15 @@ class CuratedDataBuilder:
         return self._president_state_party_rows(
             base,
             [
-                "cycle", "state", "race_id", "option_id", "name", "party",
-                "incumbent", "previous_vote_share", "fundraising_usd",
+                "cycle",
+                "state",
+                "race_id",
+                "option_id",
+                "name",
+                "party",
+                "incumbent",
+                "previous_vote_share",
+                "fundraising_usd",
             ],
             dem_columns={
                 **dem_ids,
@@ -774,9 +781,17 @@ class CuratedDataBuilder:
             )
         self._require_non_nulls(base, ["as_of"], parser_version)
         return base.select(
-            "cycle", "state", "race_id", "as_of", "as_of_offset_days",
-            "partisan_lean", "incumbency_advantage", "economic_index",
-            "demographic_turnout_index", "historical_turnout_rate", "registered_voters",
+            "cycle",
+            "state",
+            "race_id",
+            "as_of",
+            "as_of_offset_days",
+            "partisan_lean",
+            "incumbency_advantage",
+            "economic_index",
+            "demographic_turnout_index",
+            "historical_turnout_rate",
+            "registered_voters",
         )
 
     def _senate_state_panel_polls(
@@ -813,9 +828,20 @@ class CuratedDataBuilder:
         polls = self._president_state_party_rows(
             base,
             [
-                "poll_id", "cycle", "state", "race_id", "pollster",
-                "start_date", "end_date", "population", "sample_size",
-                "sponsor_class", "methodology", "option_id", "pct", "as_of_offset_days",
+                "poll_id",
+                "cycle",
+                "state",
+                "race_id",
+                "pollster",
+                "start_date",
+                "end_date",
+                "population",
+                "sample_size",
+                "sponsor_class",
+                "methodology",
+                "option_id",
+                "pct",
+                "as_of_offset_days",
             ],
             dem_columns={**dem_ids, "pct": "dem_poll_pct"},
             rep_columns={**rep_ids, "pct": "rep_poll_pct"},
@@ -921,8 +947,15 @@ class CuratedDataBuilder:
         return self._president_state_party_rows(
             base,
             [
-                "cycle", "state", "race_id", "option_id", "name", "party",
-                "incumbent", "previous_vote_share", "fundraising_usd",
+                "cycle",
+                "state",
+                "race_id",
+                "option_id",
+                "name",
+                "party",
+                "incumbent",
+                "previous_vote_share",
+                "fundraising_usd",
             ],
             dem_columns={
                 **dem_ids,
@@ -977,9 +1010,17 @@ class CuratedDataBuilder:
             )
         self._require_non_nulls(base, ["as_of"], parser_version)
         return base.select(
-            "cycle", "state", "race_id", "as_of", "as_of_offset_days",
-            "partisan_lean", "incumbency_advantage", "economic_index",
-            "demographic_turnout_index", "historical_turnout_rate", "registered_voters",
+            "cycle",
+            "state",
+            "race_id",
+            "as_of",
+            "as_of_offset_days",
+            "partisan_lean",
+            "incumbency_advantage",
+            "economic_index",
+            "demographic_turnout_index",
+            "historical_turnout_rate",
+            "registered_voters",
         )
 
     def _house_district_panel_polls(
@@ -993,9 +1034,7 @@ class CuratedDataBuilder:
         base_frame = frame
         if "competitive" in frame.columns:
             base_frame = frame.filter(pl.col("competitive"))
-        base = self._house_district_panel_base(
-            base_frame, required, parser_version, parser_args
-        )
+        base = self._house_district_panel_base(base_frame, required, parser_version, parser_args)
         if offsets:
             duration_days = self._panel_poll_duration_days(parser_args, parser_version)
             base = self._expand_panel_as_of_offsets(base, offsets).with_columns(
@@ -1022,9 +1061,20 @@ class CuratedDataBuilder:
         polls = self._president_state_party_rows(
             base,
             [
-                "poll_id", "cycle", "state", "race_id", "pollster",
-                "start_date", "end_date", "population", "sample_size",
-                "sponsor_class", "methodology", "option_id", "pct", "as_of_offset_days",
+                "poll_id",
+                "cycle",
+                "state",
+                "race_id",
+                "pollster",
+                "start_date",
+                "end_date",
+                "population",
+                "sample_size",
+                "sponsor_class",
+                "methodology",
+                "option_id",
+                "pct",
+                "as_of_offset_days",
             ],
             dem_columns={**dem_ids, "pct": "dem_poll_pct"},
             rep_columns={**rep_ids, "pct": "rep_poll_pct"},

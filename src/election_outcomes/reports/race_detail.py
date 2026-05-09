@@ -56,9 +56,7 @@ class RaceDetailRenderer:
         race_dir.mkdir(parents=True, exist_ok=True)
         plot_dir = race_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
-        catalog_meta = {
-            row["race_id"]: row for row in race_catalog.iter_rows(named=True)
-        }
+        catalog_meta = {row["race_id"]: row for row in race_catalog.iter_rows(named=True)}
         results: dict[str, str] = {}
         for race_id in targets:
             page_path = race_dir / f"{race_id}.html"
@@ -83,9 +81,7 @@ class RaceDetailRenderer:
         if candidates.is_empty():
             return []
         ranked = (
-            candidates.with_columns(
-                (pl.col("winner_probability") - 0.5).abs().alias("_dist")
-            )
+            candidates.with_columns((pl.col("winner_probability") - 0.5).abs().alias("_dist"))
             .group_by("race_id", maintain_order=True)
             .agg(pl.col("_dist").min().alias("_dist"))
             .sort("_dist")
@@ -197,8 +193,7 @@ class RaceDetailRenderer:
         race_forecasts: pl.DataFrame,
     ) -> Path | None:
         slice_ = race_forecasts.filter(
-            (pl.col("race_id") == race_id)
-            & pl.col("component_contributions").is_not_null()
+            (pl.col("race_id") == race_id) & pl.col("component_contributions").is_not_null()
         )
         if slice_.is_empty():
             return None
@@ -215,9 +210,10 @@ class RaceDetailRenderer:
             if not isinstance(info, dict):
                 continue
             try:
-                contribution = float(info.get("weighted_marginal_win_probability", 0.0)) - float(
-                    info.get("weight", 0.0)
-                ) * 0.5
+                contribution = (
+                    float(info.get("weighted_marginal_win_probability", 0.0))
+                    - float(info.get("weight", 0.0)) * 0.5
+                )
             except (TypeError, ValueError):
                 continue
             components.append(component)
@@ -226,9 +222,7 @@ class RaceDetailRenderer:
             return None
         order = sorted(zip(components, contributions, strict=True), key=lambda item: item[1])
         components_sorted, contributions_sorted = zip(*order, strict=True)
-        colors = [
-            PARTY["DEM"] if value > 0 else PARTY["REP"] for value in contributions_sorted
-        ]
+        colors = [PARTY["DEM"] if value > 0 else PARTY["REP"] for value in contributions_sorted]
         fig, ax = plt.subplots(figsize=SIZE_PANEL)
         ax.barh(list(components_sorted), list(contributions_sorted), color=colors)
         ax.axvline(0, color=NEUTRAL["muted"], linewidth=0.8)
@@ -306,10 +300,10 @@ class RaceDetailRenderer:
   <section class="section">
     <h2>Provenance</h2>
     <p class="subtitle">
-      Race tier: <strong>{html.escape(str(race_meta.get('tier') or 'n/a'))}</strong>.
-      Office type: {html.escape(str(race_meta.get('office_type') or 'n/a'))}.
-      Geography: {html.escape(str(race_meta.get('geography') or 'n/a'))}.
-      Cycle: {html.escape(str(race_meta.get('cycle') or 'n/a'))}.
+      Race tier: <strong>{html.escape(str(race_meta.get("tier") or "n/a"))}</strong>.
+      Office type: {html.escape(str(race_meta.get("office_type") or "n/a"))}.
+      Geography: {html.escape(str(race_meta.get("geography") or "n/a"))}.
+      Cycle: {html.escape(str(race_meta.get("cycle") or "n/a"))}.
     </p>
   </section>
 </div>
