@@ -236,21 +236,10 @@ class CycleEvaluationReport:
         aggregate = payload["aggregate"]
         chamber_label = self._chamber_label(frame)
         threshold_label = self._threshold_label(frame)
-        cards = [
-            ("Cycles evaluated", payload["cycle_count"]),
-            (f"{chamber_label} majority threshold", threshold_label),
-            ("Majority winner accuracy", self._pct(aggregate.get("majority_winner_accuracy"))),
-            ("Mean state/seat accuracy", self._pct(aggregate["mean_state_accuracy"])),
-            ("Mean Brier", self._num(aggregate["mean_brier_score"], 4)),
-            ("Total upsets", aggregate["total_upsets"]),
-        ]
-        card_html = "".join(
-            "<div class='card'>"
-            f"<span>{html.escape(str(label))}</span><strong>{value}</strong></div>"
-            for label, value in cards
-        )
+        narrative = self._narrative_summary(frame, aggregate, chamber_label, threshold_label)
+        kpi_html = self._kpi_html(payload, aggregate, chamber_label, threshold_label)
         plot_html = "".join(
-            "<figure class='plot-card'>"
+            "<figure>"
             f"<img src='{html.escape(plot['path'])}' alt='{html.escape(plot['title'])}'>"
             f"<figcaption>{html.escape(plot['title'])}</figcaption></figure>"
             for plot in payload["plot_manifest"]
@@ -260,11 +249,13 @@ class CycleEvaluationReport:
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Cycle Evaluation {html.escape(str(payload["run_id"]))}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cycle Evaluation {html.escape(str(payload['run_id']))}</title>
   <style>{self._css()}</style>
 </head>
 <body>
-  <header>
+<div class="container">
+  <header class="hero">
     <p class="eyebrow">Historical benchmark</p>
     <h1>{html.escape(chamber_label)} Cycle Evaluation</h1>
     <p class="subtitle">
@@ -273,10 +264,25 @@ class CycleEvaluationReport:
       <strong>{html.escape(str(threshold_label))}</strong> seats/votes.
     </p>
   </header>
-  <section class="cards">{card_html}</section>
-  <section class="plots">{plot_html}</section>
-  <section class="panel">
-    <h2>Cycle Results — Majority Story</h2>
+
+  <div class="narrative">{html.escape(narrative)}</div>
+
+  <section class="section">
+    <h2>Headline numbers</h2>
+    <div class="kpi-row">{kpi_html}</div>
+  </section>
+
+  <section class="section">
+    <h2>Distribution across cycles</h2>
+    <p class="subtitle" style="margin-bottom:14px;">
+      Probability of the headline outcome, race-level accuracy, and error metrics
+      plotted side by side so you can see how the forecast performed in each cycle.
+    </p>
+    <div class="plot-grid">{plot_html}</div>
+  </section>
+
+  <section class="section">
+    <h2>Cycle results — majority story</h2>
     <table>
       <thead>
         <tr>
@@ -296,6 +302,7 @@ class CycleEvaluationReport:
       <tbody>{row_html}</tbody>
     </table>
   </section>
+</div>
 </body>
 </html>
 """
@@ -441,55 +448,80 @@ class CycleEvaluationReport:
 
     @staticmethod
     def _css() -> str:
-        return """
-:root { --ink: #202124; --muted: #656a70; --rule: #d8dde3; --bg: #f6f4ef; --card: #ffffff; }
-body {
-  margin: 0;
-  padding: 36px;
-  background: var(--bg);
-  color: var(--ink);
-  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-header { max-width: 1040px; margin: 0 auto 24px; }
-h1 { margin: 0; font-size: 44px; letter-spacing: 0; }
-h2 { margin: 0 0 14px; }
-.eyebrow {
-  margin: 0 0 8px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  font-size: 12px;
-  font-weight: 700;
-}
-.subtitle { color: var(--muted); max-width: 760px; }
-.cards, .plots, .panel { max-width: 1040px; margin: 0 auto 20px; }
-.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.card, .panel, .plot-card {
-  background: var(--card);
-  border: 1px solid var(--rule);
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(42, 37, 25, .05);
-}
-.card { padding: 16px; }
-.card span { color: var(--muted); display: block; }
-.card strong { font-size: 28px; }
-.plots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.plot-card { margin: 0; padding: 12px; }
-.plot-card img { width: 100%; height: 220px; object-fit: contain; display: block; }
-.plot-card figcaption { color: var(--muted); font-size: 13px; margin-top: 8px; }
-.panel { padding: 18px; overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; }
-th, td {
-  text-align: left;
-  border-bottom: 1px solid var(--rule);
-  padding: 9px 7px;
-  vertical-align: top;
-}
-th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-a { color: #245b8f; }
-@media (max-width: 860px) {
-  body { padding: 20px; }
-  .cards, .plots { grid-template-columns: 1fr; }
-  h1 { font-size: 36px; }
-}
-"""
+        from election_outcomes.reports._style import report_css
+
+        return report_css()
+
+    @staticmethod
+    def _kpi_html(
+        payload: dict[str, Any],
+        aggregate: dict[str, Any],
+        chamber_label: str,
+        threshold_label: str,
+    ) -> str:
+        items: list[tuple[str, str, str]] = [
+            ("Cycles evaluated", str(payload["cycle_count"]), "rolling-origin holdouts"),
+            (
+                "Majority threshold",
+                str(threshold_label),
+                f"{chamber_label} control gate",
+            ),
+            (
+                "Majority winner accuracy",
+                CycleEvaluationReport._pct(aggregate.get("majority_winner_accuracy")),
+                "share of cycles called correctly",
+            ),
+            (
+                "Mean race accuracy",
+                CycleEvaluationReport._pct(aggregate.get("mean_state_accuracy")),
+                "average per-race winner accuracy",
+            ),
+            (
+                "Mean Brier score",
+                CycleEvaluationReport._num(aggregate.get("mean_brier_score"), 4),
+                "lower is better",
+            ),
+            (
+                "Total upsets",
+                str(aggregate.get("total_upsets") or 0),
+                "races forecast lost but won",
+            ),
+        ]
+        return "".join(
+            "<div class='kpi'>"
+            f"<span class='label'>{html.escape(label)}</span>"
+            f"<strong class='value'>{html.escape(str(value))}</strong>"
+            f"<div class='detail'>{html.escape(detail)}</div>"
+            "</div>"
+            for label, value, detail in items
+        )
+
+    @staticmethod
+    def _narrative_summary(
+        frame: pl.DataFrame,
+        aggregate: dict[str, Any],
+        chamber_label: str,
+        threshold_label: str,
+    ) -> str:
+        if frame.is_empty():
+            return ""
+        cycles = sorted(int(c) for c in frame["cycle"].drop_nulls().unique().to_list())
+        first, last = cycles[0], cycles[-1]
+        majority_acc = aggregate.get("majority_winner_accuracy")
+        race_acc = aggregate.get("mean_state_accuracy")
+        brier = aggregate.get("mean_brier_score")
+        parts = [
+            f"{chamber_label} forecast across {len(cycles)} cycles "
+            f"({first}-{last}); majority threshold {threshold_label}."
+        ]
+        if majority_acc is not None:
+            parts.append(
+                f"Majority winner correct on {float(majority_acc) * 100:.0f}% of cycles."
+            )
+        if race_acc is not None:
+            parts.append(
+                f"Per-race accuracy averaged {float(race_acc) * 100:.1f}%."
+            )
+        if brier is not None:
+            parts.append(f"Mean Brier {float(brier):.4f} (lower is better).")
+        return " ".join(parts)

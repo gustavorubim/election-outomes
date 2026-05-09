@@ -49,13 +49,47 @@ class PlotGenerator:
         plot_dir = artifact_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
         manifest: dict[str, list[dict[str, str]]] = {
+            "distribution": [],
             "calibration": [],
             "projection": [],
             "trajectory": [],
+            "drivers": [],
             "stability": [],
             "model_quality": [],
             "benchmark": [],
         }
+        self._add(
+            manifest,
+            "distribution",
+            self._seat_count_histogram(
+                plot_dir, race_catalog, forecast_draws, control_forecasts
+            ),
+            "Seat-count distribution per party",
+        )
+        self._add(
+            manifest,
+            "distribution",
+            self._race_vote_share_kde_grid(plot_dir, race_forecasts, forecast_draws),
+            "Vote-share KDEs for the closest races",
+        )
+        self._add(
+            manifest,
+            "drivers",
+            self._tipping_point_bars(plot_dir, control_forecasts),
+            "Tipping-point race ranking",
+        )
+        self._add(
+            manifest,
+            "drivers",
+            self._driver_waterfall(plot_dir, race_forecasts),
+            "Component drivers for closest races",
+        )
+        self._add(
+            manifest,
+            "calibration",
+            self._reliability_diagram_with_band(plot_dir, backtest_predictions),
+            "Reliability diagram with 95% Wilson band",
+        )
         self._add(
             manifest,
             "calibration",
@@ -886,3 +920,413 @@ class PlotGenerator:
         for spine in ("top", "right", "left"):
             ax.spines[spine].set_visible(False)
         ax.spines["bottom"].set_color(GRID_COLOR)
+
+    # -----------------------------------------------------------------------
+    # Distribution-aware additions (Phase 2 of the dashboard redesign).
+    # -----------------------------------------------------------------------
+
+    def _seat_count_histogram(
+        self,
+        plot_dir: Path,
+        race_catalog: pl.DataFrame,
+        forecast_draws: pl.DataFrame,
+        control_forecasts: pl.DataFrame,
+    ) -> Path | None:
+        """Histogram of total seats per party across draws with majority threshold."""
+        if (
+            race_catalog.is_empty()
+            or forecast_draws.is_empty()
+            or control_forecasts.is_empty()
+        ):
+            return None
+        catalog = race_catalog.select(["race_id", "control_body", "seats"])
+        joined = forecast_draws.join(catalog, on="race_id", how="inner").filter(
+            pl.col("control_body").is_not_null()
+        )
+        if joined.is_empty():
+            return None
+        bodies = control_forecasts.select(["control_body", "control_threshold"]).unique()
+        if bodies.is_empty():
+            return None
+        body = str(bodies.row(0, named=True)["control_body"])
+        threshold = int(bodies.row(0, named=True)["control_threshold"])
+        body_draws = joined.filter(pl.col("control_body") == body).filter(pl.col("winner"))
+        if body_draws.is_empty():
+            return None
+        per_draw = (
+            body_draws.group_by(["draw_id", "party"])
+            .agg(pl.col("seats").sum().alias("seat_count"))
+            .sort("draw_id")
+        )
+        holdovers = {
+            str(row["party"]).upper(): int(row.get("holdover_seats") or 0)
+            for row in control_forecasts.iter_rows(named=True)
+            if str(row["control_body"]) == body
+        }
+        parties_present = sorted(per_draw["party"].unique().to_list())
+        if not parties_present:
+            return None
+        fig, ax = plt.subplots(figsize=(9.6, 4.0), dpi=150)
+        all_max = 0
+        for party in parties_present:
+            slice_ = per_draw.filter(pl.col("party") == party)["seat_count"].to_numpy()
+            slice_ = slice_ + holdovers.get(party.upper(), 0)
+            if slice_.size == 0:
+                continue
+            bins = max(15, int(slice_.max() - slice_.min()) + 1)
+            color = PARTY_COLORS.get(str(party).upper(), ACCENT_FALLBACK)
+            ax.hist(
+                slice_,
+                bins=bins,
+                alpha=0.55,
+                color=color,
+                edgecolor=color,
+                linewidth=1.0,
+                label=str(party).upper(),
+            )
+            all_max = max(all_max, int(slice_.max()))
+        ax.axvline(threshold, color=MUTED_COLOR, linestyle="--", linewidth=1.2)
+        ax.text(
+            threshold,
+            ax.get_ylim()[1] * 0.95,
+            f"  threshold = {threshold}",
+            color=MUTED_COLOR,
+            fontsize=9,
+            va="top",
+        )
+        ax.set_xlabel(f"Total {body} seats per draw")
+        ax.set_ylabel("Simulation draws")
+        ax.set_title(
+            f"{body.title()} Seat-Count Distribution",
+            loc="left",
+            fontweight="bold",
+        )
+        ax.legend(frameon=False, fontsize=9)
+        self._style_axis(ax)
+        ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8, alpha=0.9)
+        return self._save(fig, plot_dir / "seat_count_histogram.png")
+
+    def _race_vote_share_kde_grid(
+        self,
+        plot_dir: Path,
+        race_forecasts: pl.DataFrame,
+        forecast_draws: pl.DataFrame,
+        max_panels: int = 12,
+    ) -> Path | None:
+        """Small multiples of vote-share KDEs for the most competitive races."""
+        if race_forecasts.is_empty() or forecast_draws.is_empty():
+            return None
+        candidates = race_forecasts.filter(pl.col("winner_probability").is_not_null())
+        if candidates.is_empty():
+            return None
+        ranked = (
+            candidates.with_columns(
+                (pl.col("winner_probability") - 0.5).abs().alias("_dist")
+            )
+            .group_by("race_id", maintain_order=True)
+            .agg(pl.col("_dist").min().alias("_dist"))
+            .sort("_dist")
+            .head(max_panels)
+        )
+        race_ids = ranked["race_id"].to_list()
+        if not race_ids:
+            return None
+        n = len(race_ids)
+        cols = min(3, n)
+        rows = int(np.ceil(n / cols))
+        fig, axes = plt.subplots(
+            rows, cols, figsize=(cols * 4.5, rows * 3.0), dpi=150, squeeze=False
+        )
+        for index, race_id in enumerate(race_ids):
+            ax = axes[index // cols][index % cols]
+            self._render_race_kde_panel(ax, race_id, race_forecasts, forecast_draws)
+        for index in range(n, rows * cols):
+            axes[index // cols][index % cols].axis("off")
+        fig.suptitle(
+            "Vote-Share Distribution — Most Competitive Races",
+            x=0.02,
+            ha="left",
+            fontsize=14,
+            fontweight="bold",
+            color=TEXT_COLOR,
+        )
+        return self._save(fig, plot_dir / "race_vote_share_kde.png")
+
+    def _render_race_kde_panel(
+        self,
+        ax: plt.Axes,
+        race_id: str,
+        race_forecasts: pl.DataFrame,
+        forecast_draws: pl.DataFrame,
+    ) -> None:
+        race_draws = forecast_draws.filter(pl.col("race_id") == race_id)
+        race_meta = race_forecasts.filter(pl.col("race_id") == race_id)
+        if race_draws.is_empty() or race_meta.is_empty():
+            ax.text(0.5, 0.5, "no draws", ha="center", va="center", color=MUTED_COLOR)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
+        for option in race_meta.iter_rows(named=True):
+            samples = (
+                race_draws.filter(pl.col("option_id") == option["option_id"])["vote_share"]
+                .to_numpy()
+                .astype(float)
+            )
+            if samples.size < 5:
+                continue
+            party = str(option.get("party") or "").upper()
+            color = PARTY_COLORS.get(party, ACCENT_FALLBACK)
+            xs = np.linspace(max(0.0, samples.min() - 0.05), min(1.0, samples.max() + 0.05), 200)
+            density = self._gaussian_kde(samples, xs)
+            ax.fill_between(xs, density, alpha=0.18, color=color)
+            ax.plot(xs, density, color=color, linewidth=1.6, label=party)
+            ax.axvline(
+                float(option.get("vote_share_mean") or np.mean(samples)),
+                color=color,
+                linestyle="-",
+                linewidth=0.9,
+                alpha=0.7,
+            )
+        ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=0.8)
+        ax.set_xlim(0.25, 0.75)
+        ax.set_yticks([])
+        ax.set_title(race_id, fontsize=11, color=TEXT_COLOR, loc="left")
+        ax.set_xlabel("Vote share", fontsize=9)
+        ax.legend(frameon=False, fontsize=8, loc="upper right")
+        for spine in ("top", "right", "left"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_color(GRID_COLOR)
+
+    def _tipping_point_bars(
+        self,
+        plot_dir: Path,
+        control_forecasts: pl.DataFrame,
+    ) -> Path | None:
+        """Horizontal bars of pivotal-flip rates for the top tipping-point races."""
+        if control_forecasts.is_empty() or "pivotal_rates" not in control_forecasts.columns:
+            return None
+        rows: list[dict[str, object]] = []
+        for record in control_forecasts.iter_rows(named=True):
+            raw = record.get("pivotal_rates")
+            if not raw:
+                continue
+            try:
+                payload = json.loads(str(raw))
+            except json.JSONDecodeError:
+                continue
+            for item in payload:
+                rows.append(
+                    {
+                        "race_id": str(item.get("race_id")),
+                        "party": str(record.get("party") or "").upper(),
+                        "pivotal_rate": float(item.get("pivotal_rate") or 0.0),
+                    }
+                )
+        if not rows:
+            return None
+        frame = (
+            pl.DataFrame(rows)
+            .sort("pivotal_rate", descending=True)
+            .head(10)
+            .reverse()
+        )
+        labels = [
+            f"{row['race_id']} ({row['party']})" for row in frame.iter_rows(named=True)
+        ]
+        values = frame["pivotal_rate"].to_list()
+        colors = [
+            PARTY_COLORS.get(str(row["party"]).upper(), ACCENT_FALLBACK)
+            for row in frame.iter_rows(named=True)
+        ]
+        fig, ax = plt.subplots(figsize=(9.6, max(3.6, len(labels) * 0.42)), dpi=150)
+        ax.barh(labels, values, color=colors)
+        ax.set_xlabel("Pivotal-flip rate (P this race decides control)")
+        ax.set_title("Tipping-Point Races", loc="left", fontweight="bold")
+        ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+        for index, value in enumerate(values):
+            ax.text(value + 0.005, index, f"{value:.1%}", va="center", fontsize=9)
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "tipping_point_bars.png")
+
+    def _driver_waterfall(
+        self,
+        plot_dir: Path,
+        race_forecasts: pl.DataFrame,
+        max_panels: int = 6,
+    ) -> Path | None:
+        """Per-race component contribution waterfalls for the closest races."""
+        if race_forecasts.is_empty() or "component_contributions" not in race_forecasts.columns:
+            return None
+        candidates = race_forecasts.filter(
+            pl.col("winner_probability").is_not_null()
+            & pl.col("component_contributions").is_not_null()
+        )
+        if candidates.is_empty():
+            return None
+        candidates = candidates.with_columns(
+            (pl.col("winner_probability") - 0.5).abs().alias("_dist")
+        ).sort("_dist")
+        chosen: list[dict[str, object]] = []
+        seen_races: set[str] = set()
+        for row in candidates.iter_rows(named=True):
+            race_id = str(row["race_id"])
+            if race_id in seen_races:
+                continue
+            seen_races.add(race_id)
+            chosen.append(row)
+            if len(chosen) >= max_panels:
+                break
+        if not chosen:
+            return None
+        cols = min(3, len(chosen))
+        rows_n = int(np.ceil(len(chosen) / cols))
+        fig, axes = plt.subplots(
+            rows_n, cols, figsize=(cols * 4.5, rows_n * 3.2), dpi=150, squeeze=False
+        )
+        for index, row in enumerate(chosen):
+            ax = axes[index // cols][index % cols]
+            self._render_driver_waterfall(ax, row)
+        for index in range(len(chosen), rows_n * cols):
+            axes[index // cols][index % cols].axis("off")
+        fig.suptitle(
+            "Component Drivers — Closest Races",
+            x=0.02,
+            ha="left",
+            fontsize=14,
+            fontweight="bold",
+            color=TEXT_COLOR,
+        )
+        return self._save(fig, plot_dir / "driver_waterfall.png")
+
+    def _render_driver_waterfall(self, ax: plt.Axes, row: dict[str, object]) -> None:
+        try:
+            payload = json.loads(str(row.get("component_contributions") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict) or not payload:
+            ax.text(0.5, 0.5, "no decomposition", ha="center", va="center", color=MUTED_COLOR)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
+        components = []
+        contributions = []
+        for component, info in payload.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                contribution = float(info.get("weighted_marginal_win_probability", 0.0)) - float(
+                    info.get("weight", 0.0)
+                ) * 0.5
+            except (TypeError, ValueError):
+                continue
+            components.append(component)
+            contributions.append(contribution)
+        if not components:
+            ax.text(0.5, 0.5, "empty contributions", ha="center", va="center", color=MUTED_COLOR)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            return
+        order = sorted(zip(components, contributions, strict=True), key=lambda item: item[1])
+        components_sorted, contributions_sorted = zip(*order, strict=True)
+        colors = [
+            PARTY_COLORS["DEM"] if value > 0 else PARTY_COLORS["REP"]
+            for value in contributions_sorted
+        ]
+        ax.barh(list(components_sorted), list(contributions_sorted), color=colors)
+        ax.axvline(0, color=MUTED_COLOR, linewidth=0.8)
+        ax.set_title(
+            f"{row.get('race_id')} → {str(row.get('option_id') or '').split('-')[-1]}",
+            fontsize=11,
+            color=TEXT_COLOR,
+            loc="left",
+        )
+        ax.set_xlabel("Contribution to D-leaning win probability", fontsize=9)
+        for spine in ("top", "right", "left"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_color(GRID_COLOR)
+
+    def _reliability_diagram_with_band(
+        self, plot_dir: Path, frame: pl.DataFrame
+    ) -> Path | None:
+        """Calibration curve with Wilson confidence band and forecast histogram."""
+        if frame.is_empty() or "ensemble_probability" not in frame.columns:
+            return None
+        df = frame.select(["ensemble_probability", "actual_winner"]).drop_nulls()
+        if df.is_empty():
+            return None
+        probability = df["ensemble_probability"].cast(pl.Float64).to_numpy()
+        actual = df["actual_winner"].cast(pl.Float64).to_numpy()
+        bins = np.linspace(0, 1, 11)
+        xs: list[float] = []
+        ys: list[float] = []
+        ns: list[int] = []
+        for lower, upper in pairwise(bins):
+            mask = (probability >= lower) & (
+                probability < upper if upper < 1 else probability <= upper
+            )
+            if not np.any(mask):
+                continue
+            xs.append(float(np.mean(probability[mask])))
+            ys.append(float(np.mean(actual[mask])))
+            ns.append(int(mask.sum()))
+        if not xs:
+            return None
+        z = 1.96
+        lower_band = []
+        upper_band = []
+        for y, n in zip(ys, ns, strict=True):
+            if n == 0:
+                lower_band.append(y)
+                upper_band.append(y)
+                continue
+            denom = 1 + z * z / n
+            centre = (y + z * z / (2 * n)) / denom
+            half = (z / denom) * np.sqrt(y * (1 - y) / n + z * z / (4 * n * n))
+            lower_band.append(max(0.0, centre - half))
+            upper_band.append(min(1.0, centre + half))
+        fig, (ax_main, ax_hist) = plt.subplots(
+            2, 1, figsize=(7.5, 6.0), dpi=150, gridspec_kw={"height_ratios": [3, 1]}
+        )
+        ax_main.plot([0, 1], [0, 1], color=MUTED_COLOR, linestyle="--", linewidth=1)
+        ax_main.fill_between(xs, lower_band, upper_band, alpha=0.18, color=PARTY_COLORS["DEM"])
+        ax_main.scatter(xs, ys, s=72, color=PARTY_COLORS["DEM"], zorder=3)
+        for x, y in zip(xs, ys, strict=True):
+            ax_main.text(x + 0.02, y, f"{y:.0%}", va="center", fontsize=9, color=TEXT_COLOR)
+        ax_main.set_xlim(0, 1)
+        ax_main.set_ylim(0, 1)
+        ax_main.set_xlabel("Mean forecast probability")
+        ax_main.set_ylabel("Observed win rate")
+        ax_main.set_title(
+            "Reliability Diagram (95% Wilson band)",
+            loc="left",
+            fontweight="bold",
+        )
+        ax_main.xaxis.set_major_formatter(PercentFormatter(1.0))
+        ax_main.yaxis.set_major_formatter(PercentFormatter(1.0))
+        self._style_axis(ax_main)
+        ax_hist.hist(probability, bins=bins, color=PARTY_COLORS["DEM"], alpha=0.55)
+        ax_hist.set_xlim(0, 1)
+        ax_hist.set_ylabel("n", fontsize=9)
+        ax_hist.set_xlabel("Forecast probability distribution")
+        ax_hist.xaxis.set_major_formatter(PercentFormatter(1.0))
+        for spine in ("top", "right", "left"):
+            ax_hist.spines[spine].set_visible(False)
+        ax_hist.spines["bottom"].set_color(GRID_COLOR)
+        return self._save(fig, plot_dir / "reliability_diagram.png")
+
+    @staticmethod
+    def _gaussian_kde(samples: np.ndarray, xs: np.ndarray) -> np.ndarray:
+        """Plain Gaussian KDE without depending on scipy."""
+        if samples.size == 0:
+            return np.zeros_like(xs)
+        std = float(np.std(samples))
+        if std == 0:
+            std = 1e-3
+        bw = std * (4 / (3 * samples.size)) ** (1 / 5)
+        bw = max(bw, 1e-3)
+        diffs = (xs[:, None] - samples[None, :]) / bw
+        kernel = np.exp(-0.5 * diffs * diffs) / np.sqrt(2 * np.pi)
+        return kernel.sum(axis=1) / (samples.size * bw)
+
+
+ACCENT_FALLBACK = "#547c70"

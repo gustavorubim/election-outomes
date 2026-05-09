@@ -25,6 +25,15 @@ class DiagnosticsReport:
         methodology_benchmark = methodology_benchmark or {}
         top = self._topline(race_forecasts, control_forecasts)
         css = self._css()
+        narrative = self._narrative_blurb(race_forecasts, control_forecasts, backtest_payload)
+        distribution_plots = self._plot_sections(
+            plot_manifest or {},
+            categories=["distribution"],
+        )
+        driver_plots = self._plot_sections(
+            plot_manifest or {},
+            categories=["drivers"],
+        )
         metric_cards = "\n".join(
             [
                 self._metric_card("Projected margin", top["margin"], "mean two-party margin"),
@@ -93,6 +102,21 @@ class DiagnosticsReport:
     </div>
   </section>
 
+  {f'<div class="narrative">{html.escape(narrative)}</div>' if narrative else ""}
+
+  <section class="panel">
+    <div class="section-head">
+      <p class="eyebrow">Outcome distribution</p>
+      <h2>Where The Forecast Lives</h2>
+    </div>
+    <p class="muted">
+      Histogram of total seats per party across simulation draws and KDEs of vote
+      share for the closest races. Distribution charts replace headline-mean bars
+      so the uncertainty around the call is visible.
+    </p>
+    {distribution_plots or "<p class='muted'>No distribution plots emitted.</p>"}
+  </section>
+
   <section class="panel topline-plots">
     <div class="section-head">
       <p class="eyebrow">Top-line forecast</p>
@@ -107,6 +131,19 @@ class DiagnosticsReport:
       <h2>Race Probabilities And Vote Share</h2>
     </div>
     {self._forecast_table(race_forecasts)}
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <p class="eyebrow">Drivers</p>
+      <h2>Tipping Points And Component Decomposition</h2>
+    </div>
+    <p class="muted">
+      Tipping-point bars rank races by the probability that they decide the chamber
+      majority. Waterfalls show how each component (polling, fundamentals, markets)
+      moved the win-probability for the most competitive races.
+    </p>
+    {driver_plots or "<p class='muted'>No driver plots emitted.</p>"}
   </section>
 
   <section class="two-col">
@@ -532,6 +569,52 @@ class DiagnosticsReport:
             return html.escape(str(value))
 
     @staticmethod
+    def _narrative_blurb(
+        race_forecasts: pl.DataFrame,
+        control_forecasts: pl.DataFrame | None,
+        backtest_payload: dict[str, Any],
+    ) -> str:
+        """One-paragraph summary derived from existing run artifacts."""
+        lines: list[str] = []
+        if control_forecasts is not None and not control_forecasts.is_empty():
+            top = (
+                control_forecasts.sort("control_probability", descending=True)
+                .row(0, named=True)
+            )
+            body = str(top.get("control_body") or "control")
+            party = str(top.get("party") or "?")
+            prob = top.get("control_probability")
+            mean_seats = top.get("seat_count_mean")
+            threshold = top.get("control_threshold")
+            if prob is not None and mean_seats is not None and threshold is not None:
+                lines.append(
+                    f"{party} forecast majority of the {body} with "
+                    f"{float(prob) * 100:.1f}% probability "
+                    f"(mean {float(mean_seats):.1f} of {threshold} seats)."
+                )
+        if not race_forecasts.is_empty() and "winner_probability" in race_forecasts.columns:
+            close = race_forecasts.filter(
+                pl.col("winner_probability").is_not_null()
+                & (pl.col("winner_probability") > 0.0)
+                & (pl.col("winner_probability") < 1.0)
+            ).with_columns((pl.col("winner_probability") - 0.5).abs().alias("_dist"))
+            if not close.is_empty():
+                tightest = close.sort("_dist").row(0, named=True)
+                lines.append(
+                    f"Closest race: {tightest['race_id']} "
+                    f"({float(tightest['winner_probability']) * 100:.1f}% top probability)."
+                )
+        rolling = backtest_payload.get("rolling_origin") or {}
+        cycles = rolling.get("cycles") or []
+        rows = backtest_payload.get("row_count")
+        if cycles and rows:
+            lines.append(
+                f"Rolling-origin trained on {rows} rows across cycles "
+                f"{', '.join(str(c) for c in cycles)}."
+            )
+        return " ".join(lines)
+
+    @staticmethod
     def _css() -> str:
         return """
 :root {
@@ -680,6 +763,16 @@ td span { display: block; color: var(--muted); font-size: 12px; }
 .reward.neutral { border-left: 4px solid #8d8d8d; }
 .callout { background: #fff4dd; border-left: 4px solid var(--gold); padding: 10px 12px; }
 .model-quality-note { margin-top: -6px; margin-bottom: 18px; }
+.narrative {
+  background: #fbf6e8;
+  border-left: 4px solid var(--gold);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 16px 0 22px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+}
 .benchmark-score { font-size: 42px; font-weight: 800; margin: 0; }
 .plot-section h3 { border-top: 1px solid var(--rule); padding-top: 16px; color: var(--muted); }
 .plot-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
