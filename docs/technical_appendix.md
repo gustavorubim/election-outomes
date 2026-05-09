@@ -1,574 +1,1143 @@
 # Technical Appendix
 
-This appendix describes the statistical target, data contracts, model components,
-simulation approach, diagnostics, and performance design for the election forecasting
-engine.
+This appendix is the statistical contract for the forecasting engine. It is written as a
+model note rather than a product overview: notation first, equations second, and
+implementation status called out explicitly where the current code is still a pragmatic
+approximation.
 
-## 1. Forecasting Objective
+The engine forecasts distributions over outcomes. Point estimates are intermediate
+quantities; the published probabilities, intervals, control outcomes, and diagnostics
+come from simulated joint draws.
 
-The engine estimates distributions over election outcomes, not just point predictions.
-The primary unit is a race-option pair:
+## 1. Notation
 
-```text
-race_id, option_id, election_date, race_type, geography, office_type
-```
+Indexes:
 
-The canonical latent quantities are:
+- `r`: race.
+- `o`: option or candidate within race `r`.
+- `t`: calendar date.
+- `c`: election cycle.
+- `g`: geography, usually state for the presidential benchmark.
+- `b`: control body, such as `president`, `senate`, or `house`.
+- `d`: simulation draw.
+- `k`: model component, such as polling, fundamentals, markets, or public signals.
 
-- Candidate race: election-day vote-share simplex across candidates/options.
-- Ballot measure: election-day yes-share and pass/fail probability.
-- Control outcome: seat-count or office-control distribution derived from race draws.
-- Ecosystem outcome: turnout, recount risk, certification risk, and demographic support
-  metadata where available.
+Observed data:
 
-The output should answer:
+$$
+\mathcal{D}_{\le a}
+= \{ \text{polls, fundamentals, markets, public signals, metadata} :
+\text{source\_time} \le a \}
+$$
 
-- Who is favored?
-- By how much?
-- How uncertain is the result?
-- Which races decide control?
-- Which races are too sparse to forecast honestly?
-- Did the model perform well in backtests?
-- Which sources and model settings produced this answer?
+where `a` is the forecast `as_of` date. Actual results for target cycle `c` are excluded
+from training and forecasting when the forecast is dated before Election Day.
 
-## 2. Data And Provenance Model
+Latent election-day quantities:
 
-All data enters through `configs/sources.yaml`. Each source must declare:
+$$
+\boldsymbol{\theta}_{r}
+= (\theta_{r1}, \ldots, \theta_{rO_r}),
+\qquad
+\sum_{o=1}^{O_r}\theta_{ro}=1,
+\qquad
+0 \le \theta_{ro} \le 1
+$$
 
-- `id`: stable source id.
-- `table`: logical destination table.
-- `type`: source adapter type.
-- `path` or URL.
-- `parser_version`.
-- `license` or terms note.
+For two-option candidate races the margin is:
 
-The sync layer writes immutable raw snapshots and a source manifest:
+$$
+m_r = \theta_{r1} - \theta_{r2}
+$$
 
-```text
-source_id
-table
-url
-raw_path
-retrieved_at
-content_hash
-license
-parser_version
-status
-error
-downstream_usage
-```
+Winner indicator:
 
-This creates an audit chain:
+$$
+W_{ro} = \mathbb{1}\{\theta_{ro} = \max_j \theta_{rj}\}
+$$
+
+The published win probability is:
+
+$$
+\Pr(W_{ro}=1 \mid \mathcal{D}_{\le a})
+\approx
+\frac{1}{D}\sum_{d=1}^{D} W^{(d)}_{ro}
+$$
+
+## 2. Data And Lineage Contract
+
+Every source row is treated as an auditable observation, not as an anonymous feature.
+The source registry defines:
+
+$$
+s = (\text{id}, \text{table}, \text{adapter}, \text{path/url}, \text{parser\_version},
+\text{terms})
+$$
+
+Sync produces immutable raw payloads and a source manifest:
+
+$$
+\text{manifest}_s =
+(\text{retrieved\_at}, \text{content\_hash}, \text{parser\_version},
+\text{status}, \text{downstream\_usage})
+$$
+
+Forecast rows must carry:
+
+$$
+\text{lineage}_{ro} =
+(\text{source\_manifest\_hash}, \text{model\_config\_hash})
+$$
+
+`R2_provenance` is satisfied only when forecast rows can be traced back to non-empty
+source hashes and the model configuration hash used for the run.
 
 ```mermaid
 flowchart LR
-    source["source registry"]
-    raw[("raw snapshot")]
+    registry["source registry"]
+    raw[("raw snapshots")]
     manifest[/"source_manifest.parquet"/]
     curated[("curated tables")]
+    features[("feature bundle")]
     forecast[/"forecast artifacts"/]
 
-    source --> raw
+    registry --> raw
     raw --> manifest
     manifest --> curated
-    curated --> forecast
+    curated --> features
+    features --> forecast
     manifest --> forecast
 ```
 
-The model is not allowed to emit trusted forecasts without lineage. Forecast rows carry
-both source-manifest hash and model-config hash.
-
-## 3. Race Catalog And Tiering
-
-The race catalog is the central table for forecast eligibility. Every discovered race is
-tracked even when it is not forecastable.
-
-Tier policy:
-
-- Tier A: enough validated polling or market information plus fundamentals to produce
-  full probability and margin outputs.
-- Tier B: sparse but supported by fundamentals and at least one signal; uncertainty is
-  intentionally wider.
-- Tier C: tracked but no trusted probability is emitted.
-
-This prevents false precision in local, low-information, or metadata-only races.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Discovered
-    Discovered --> TierA: polls/markets + fundamentals
-    Discovered --> TierB: sparse signals + fundamentals
-    Discovered --> TierC: insufficient validated data
-    TierA --> ProbabilisticForecast
-    TierB --> WideUncertaintyForecast
-    TierC --> CatalogOnly
-```
-
-## 4. Component Models
-
-The current engine uses deterministic, fixture-backed component models with explicit
-upgrade seams for Bayesian and machine-learning replacements.
-
-### 4.1 Polling Component
-
-The polling component estimates current race preference from poll rows:
-
-```text
-poll_id, race_id, pollster, start_date, end_date, population,
-sample_size, sponsor_class, methodology, option_id, pct
-```
-
-Current estimator:
-
-```text
-latent_vote_share_t =
-  latent_vote_share_{t-1} + daily_random_walk_error
-
-observed_poll_share_t =
-  latent_vote_share_t
-  + pollster_house_effect
-  + sampling_error
-  + nonsampling_error
-```
-
-The deterministic Kalman filter initializes each race/option from
-`previous_vote_share` when available, otherwise from 50%. Observation variance is based
-on binomial sampling variance, an effective sample size adjusted for population,
-methodology, and sponsor class, and a nonsampling-error floor. Pollster house effects
-are estimated with empirical-Bayes shrinkage; the implementation iterates once from an
-initial residual estimate to time-aware residuals against the Kalman trajectory. Win
-probability is computed as:
+## 3. Race Eligibility And Sparse Honesty
 
-```text
-poll_win_probability = Phi((kalman_state_mean - 0.5) / posterior_sigma)
-```
+Let `Q_r` be a data-quality vector for race `r`:
 
-This is still not the full frontier polling model. It is a deterministic approximation
-that keeps uncertainty attached to the same signal used by the simulator.
-
-Planned frontier upgrade:
+$$
+Q_r =
+(\text{poll\_count}, \text{poll\_freshness}, \text{fundamental\_coverage},
+\text{market\_coverage}, \text{source\_lineage}, \text{metadata\_completeness})
+$$
 
-```text
-observed_poll_share =
-  latent_vote_share(race, date)
-  + pollster_house_effect
-  + mode_effect
-  + population_effect
-  + sponsor_or_internal_effect
-  + sampling_error
-  + non_sampling_error
-```
+The tier map is:
 
-Trend model:
-
-```text
-latent_vote_share(race, date)
-  follows time-to-election random walk or Brownian bridge
-```
+$$
+T_r =
+\begin{cases}
+A, & Q_r \text{ passes full probability thresholds} \\
+B, & Q_r \text{ supports a sparse forecast with wider uncertainty} \\
+C, & Q_r \text{ is tracked but not trusted for probability output}
+\end{cases}
+$$
 
-The Bayesian version should estimate pollster effects hierarchically and propagate
-polling error into simulation draws.
+Tier C semantics are strict:
 
-### 4.2 Fundamentals Component
+$$
+T_r=C \Rightarrow
+\Pr(W_{ro}=1 \mid \mathcal{D}_{\le a}) \text{ is withheld}
+$$
 
-The fundamentals model predicts prior race share from structural features:
-
-- Previous vote share.
-- Partisan lean.
-- Incumbency.
-- Fundraising proxy.
-- Economic index.
-- Demographic turnout index.
-- Historical turnout.
-- Geography and office type.
-
-The current estimator is intentionally transparent:
-
-```text
-raw_share =
-  previous_vote_share
-  + partisan_shift
-  + incumbency_adjustment
-  + finance_adjustment
-  + economic_adjustment
-  + demographic_adjustment
-```
-
-The result is normalized within race. Future versions should replace this with a
-rolling-origin trained model such as regularized regression, gradient-boosted trees, or
-a hierarchical Bayesian prior model.
-
-### 4.3 Market Component
-
-The market component treats public market prices as noisy probability observations.
-It applies liquidity/spread gates before admission:
-
-```text
-admitted_market =
-  open_interest >= min_open_interest
-  and spread <= max_spread
-```
-
-Current output:
-
-```text
-win_probability = latest_public_market_probability
-vote_share_proxy = 0.5 + market_sigma * Phi^-1(probability) - favorite_longshot_bias
-```
-
-Markets should never be used for trading in this repo. The model consumes read-only
-public market data.
-
-### 4.4 Public-Signal Component
-
-Public signals include news attention, pageviews, official releases, and similar
-features. They are high-risk because they can encode popularity, controversy, media
-bias, leakage, or post-treatment effects.
-
-Default policy:
-
-- Compute and report public-signal estimates.
-- Keep them experimental unless backtests and leakage checks justify admission.
-- Require ablation evidence before changing trusted ensemble output.
-
-### 4.5 Ensemble Component
-
-The ensemble combines admitted component outputs with configured weights:
-
-```text
-ensemble_score =
-  sum(component_weight * component_estimate)
-  / sum(component_weight for admitted components)
-```
-
-Vote-share estimates are normalized within race after blending. Marginal win
-probabilities are not renormalized across options; they are reported from the component
-blend and the final race probabilities should be read from simulation-derived forecast
-rows.
-
-Current trusted components:
-
-```yaml
-trusted_components:
-  polling: true
-  fundamentals: true
-  markets: true
-  public_signals: false
-```
-
-Future versions should learn dynamic weights from rolling-origin backtests:
-
-- More polling weight near election day where polls exist.
-- More fundamentals weight early and in sparse races.
-- Market weight adjusted for liquidity and historical bias.
-- Public signals admitted only when out-of-sample evidence is strong.
-
-## 5. Simulation And Joint Outcomes
-
-The simulation layer converts ensemble point estimates into joint outcome distributions.
-It generates race-option draws with:
-
-- National correlated error.
-- Residual-covariance geography error when a learned covariance artifact is available.
-- Region correlated error.
-- Office-type correlated error.
-- Race/local heavy-tailed error.
-- Tier-specific uncertainty.
-- Turnout variation.
-- Winner flags.
-
-Two-option race simulation:
-
-```text
-share_0_draw =
-  clamp(
-    ensemble_share_0
-    + national_error_draw
-    + residual_covariance_geography_draw
-    + region_error_draw
-    + office_error_draw
-    + local_error_race_draw,
-    0.02,
-    0.98
-  )
-
-share_1_draw = 1 - share_0_draw
-
-winner = argmax(share_0_draw, share_1_draw)
-```
-
-The current residual covariance model is intentionally conservative. It estimates
-geography residuals from rolling-origin forecast errors at each scored `as_of` cut,
-then shrinks the empirical covariance toward a structured regional target and projects
-the matrix to positive semidefinite form. If there are fewer than two residual
-observations, the covariance artifact is withheld and simulation falls back to the
-national/region/office factor model. This avoids treating a single residual as a
-covariance estimate.
-
-Control forecasts are derived from draw-level winners by control body and party. This is
-important because control probabilities are not independent race probabilities; they are
-functions of correlated race outcomes. Control probabilities are evaluated against
-configured control thresholds when available; otherwise they fall back to a majority of
-modeled seats. Tipping-point races are ranked by simulated pivotal rate: how often
-flipping that race changes whether the party reaches the threshold.
-
-The `seats` field represents the unit counted by `control_body`: House seats for House
-races, Senate seats for Senate races, and Electoral College votes for presidential
-state races. The presidential threshold of `270` is therefore evaluated against summed
-state electoral votes.
-
-Ecosystem forecasts use draw-level outcomes to estimate:
-
-- Turnout mean and intervals.
-- Recount probability from close margins.
-- Certification-risk probability as a close-margin derived event.
-- Ballot-measure support flag.
-
-Demographic turnout composition and certification risk are currently explicit
-placeholders/proxies. The artifact marks demographic composition as not estimated and
-labels certification risk as a close-margin proxy rather than a calibrated legal or
-administrative-risk model.
-
-## 6. Backtesting And Calibration
-
-Backtesting uses rolling-origin component refits and component columns:
-
-```text
-baseline_probability
-polls_probability
-fundamentals_probability
-markets_probability
-public_signals_probability
-ensemble_probability
-```
-
-Metrics:
-
-- Brier score.
-- Log score.
-- Calibration intercept and slope.
-- Expected calibration error.
-- Interval coverage.
-
-The default backtest date sweep evaluates `T-90`, `T-60`, `T-30`, `T-7`, and `T-1`
-days before Election Day when source rows exist by that `as_of`. Sparse fixture data may
-score only later cuts. The baseline prior uses configurable previous-share uncertainty
-and can switch to an empirical sigma once enough prior residual rows are available.
-
-Reward use:
-
-- `R4_calibration` confirms calibration metrics are reported.
-- `R5_baseline_competition` checks whether the ensemble beats or matches baseline only
-  when a rolling-origin backtest with enough rows has run.
-- `R6_component_admission` checks trusted components against ablation evidence only
-  under the same rolling-origin and sample-size requirements.
-- `R8_uncertainty_quality` checks interval coverage against tolerance only under the
-  same rolling-origin and sample-size requirements.
-
-Calibration is not optional. A model with visually attractive projections but poor
-coverage or poor probability calibration should not be treated as trusted.
-
-The fixture-backed implementation reports metrics and plots but does not certify
-baseline competition, component admission, or uncertainty quality. Those rewards remain
-red until the rolling-origin sample reaches the configured minimum row count.
-
-## 7. Historical Result Comparison
-
-Historical comparison is different from rolling-origin backtesting. Backtesting scores
-stored historical prediction fixtures across components. Result comparison takes a
-specific forecast run and joins it to known actual results.
-
-Example:
-
-```bash
-uv run election-outcomes forecast run --as-of 2024-10-01 --run-id 2024-presidential
-uv run election-outcomes results compare \
-  --forecast-run-id 2024-presidential \
-  --comparison-id 2024-presidential-actuals \
-  --cycle 2024 \
-  --office-type president
-```
-
-The comparison table includes:
-
-- Forecast winner probability.
-- Forecast mean vote share.
-- Actual vote share.
-- Actual winner flag.
-- Predicted winner flag.
-- Race-level predicted and actual winner ids/parties.
-- Actual-winner probability for each race.
-- Vote-share error.
-- Absolute vote-share error.
-- Brier contribution.
-
-Summary metrics:
-
-- Winner accuracy.
-- Presidential state accuracy when the comparison covers state-level presidential races.
-- Modeled Electoral College winner accuracy with `full_electoral_college` versus
-  `modeled_state_slice` scope.
-- Mean absolute vote-share error.
-- Brier score.
-- Upset count.
-- Largest vote-share misses.
-- Actual-winner probability list.
-
-The bundled presidential benchmark now covers all 50 states plus DC for 2000-2024.
-For `president_2024_state`, the comparison contract evaluates all 538 electoral votes
-and labels the EC scope as `full_electoral_college`. Any smaller custom scenario is
-still labeled as a modeled state slice rather than a national winner claim.
-
-```mermaid
-flowchart TD
-    forecast[/"race_forecasts.parquet"/]
-    results[/"results.parquet"/]
-    filter{"cycle + office filters"}
-    join["join on race_id + option_id"]
-    row_metrics["row-level errors"]
-    race_metrics["winner accuracy and upsets"]
-    report["comparison HTML + plots"]
-
-    forecast --> filter
-    results --> filter
-    filter --> join
-    join --> row_metrics
-    join --> race_metrics
-    row_metrics --> report
-    race_metrics --> report
-```
-
-## 8. Diagnostics And Plots
-
-Forecast runs produce both machine-readable artifacts and human-readable diagnostics.
+This is a core modeling choice. A known race with inadequate data is not silently
+converted into a false-precision forecast.
+
+## 4. Polling Model
+
+### 4.1 Observation Equation
+
+For a poll `i` of race `r`, option `o`, and field end date `t_i`, define the observed
+share:
+
+$$
+y_i \in [0,1]
+$$
+
+The intended observation model is:
+
+$$
+y_i =
+x_{rot_i}
++ h_{j(i),o}
++ \mu_{\text{mode}(i)}
++ \pi_{\text{population}(i)}
++ \sigma_{\text{sponsor}(i)}
++ \epsilon_i
+$$
+
+where:
+
+- `x_{rot}` is latent support for option `o` in race `r` at date `t`.
+- `h_{j(i),o}` is the pollster-option house effect.
+- Mode, population, and sponsor terms represent systematic measurement adjustments.
+- `epsilon_i` combines sampling and nonsampling polling error.
+
+The current implementation collapses mode/population/sponsor effects into an effective
+sample-size adjustment and keeps the additive estimated house effect:
+
+$$
+y_i^\star = y_i - \hat h_{j(i),o}
+$$
+
+### 4.2 Effective Sample Size And Poll Variance
+
+The implemented effective sample size is:
+
+$$
+n_i^{eff}
+= \max\{1,\ n_i
+\cdot w_{\text{population}(i)}
+\cdot w_{\text{methodology}(i)}
+\cdot w_{\text{sponsor}(i)}\}
+$$
+
+The observation variance is:
+
+$$
+R_i =
+\frac{\max\{y_i(1-y_i),\ 10^{-6}\}}{n_i^{eff}}
++ \sigma_{ns}^{2}
+$$
+
+where `sigma_ns` is the configured nonsampling-error floor. The small floor prevents
+zero sampling variance for degenerate shares.
+
+### 4.3 State Evolution
+
+For each race-option trajectory:
+
+$$
+x_{rot} = x_{ro,t-1} + \eta_{rot},
+\qquad
+\eta_{rot} \sim \mathcal{N}(0,\ q\Delta t)
+$$
+
+Current implementation:
+
+- Gaussian random-walk Kalman filter.
+- Daily process variance `q`.
+- Initial mean from `previous_vote_share` when available, otherwise 0.5.
+- Initial variance from config.
+- No backward smoother in the current production path.
+
+### 4.4 Kalman Update
+
+Prediction step:
+
+$$
+m^-_t = m_{t-1},
+\qquad
+P^-_t = P_{t-1} + q\Delta t
+$$
+
+For each poll observation on date `t`:
+
+$$
+K_i = \frac{P^-_t}{P^-_t + R_i}
+$$
+
+$$
+m_t = m^-_t + K_i(y_i^\star - m^-_t)
+$$
+
+$$
+P_t = (1-K_i)P^-_t
+$$
+
+The polling component reports:
+
+$$
+\hat\theta^{poll}_{roa}=m_a
+$$
+
+$$
+\hat\sigma^{poll}_{roa}
+= \max\{\sqrt{P_a},\ \sigma_{ns}\}
+$$
+
+and a marginal normal-approximation win probability:
+
+$$
+\hat p^{poll}_{roa}
+= \Phi\left(
+\frac{\hat\theta^{poll}_{roa}-0.5}{\hat\sigma^{poll}_{roa}}
+\right)
+$$
+
+This marginal probability is a component signal. Final race probabilities are simulation
+probabilities, not merely this closed-form value.
+
+### 4.5 Empirical-Bayes House Effects
+
+Let the raw pollster residual for pollster `j` and option `o` be:
+
+$$
+\bar e_{jo}
+=
+\frac{
+\sum_{i:j(i)=j,o(i)=o} \omega_i (y_i - \tilde x_{rot_i})
+}{
+\sum_{i:j(i)=j,o(i)=o} \omega_i
+},
+\qquad
+\omega_i = R_i^{-1}
+$$
+
+where `tilde x` is the reference trajectory from the current Kalman pass.
+
+The implemented shrinkage estimator is:
+
+$$
+\lambda_{jo} = \frac{n_{jo}}{n_{jo}+\kappa}
+$$
+
+$$
+\hat h_{jo}
+= \text{clip}\left(
+\lambda_{jo}\bar e_{jo}
++ (1-\lambda_{jo})h^{prior}_{jo},
+\ -h_{max},\ h_{max}
+\right)
+$$
+
+The model iterates the house-effect estimate against the Kalman trajectory. This is
+empirical Bayes, not full hierarchical Bayes.
+
+Planned Bayesian extension:
+
+$$
+h_{jo} \sim \mathcal{N}(0,\tau_h^2),
+\qquad
+\tau_h \sim \text{HalfNormal}(s_h)
+$$
+
+with joint posterior inference over trajectories, house effects, and variance terms.
+
+## 5. Fundamentals Model
+
+### 5.1 Training Target
+
+For historical option rows with known outcomes:
+
+$$
+\Delta_{ro}
+= y^{actual}_{ro} - y^{previous}_{ro}
+$$
+
+where `previous_vote_share` is the prior-cycle or prior-result baseline for the option.
+
+Features:
+
+$$
+\mathbf{x}_{ro}
+= [
+\text{partisan\_lean}_{ro},
+\text{economic\_index}_{ro},
+\text{demographic\_turnout\_index}_{ro},
+\text{incumbent}_{ro},
+\text{fundraising\_usd}_{ro}
+]
+$$
+
+Party-signed features are encoded before fitting so that a favorable state environment
+raises the aligned party and lowers the opposing party.
+
+### 5.2 Standardized Ridge Fit
+
+If enough prior-cycle rows exist, features are standardized:
+
+$$
+z_{roj} = \frac{x_{roj}-\bar x_j}{s_j}
+$$
+
+The ridge objective is:
+
+$$
+(\hat\alpha,\hat{\boldsymbol\beta})
+=
+\arg\min_{\alpha,\boldsymbol\beta}
+\sum_{(r,o)\in \mathcal{T}}
+\left(
+\Delta_{ro} - \alpha - \mathbf{z}_{ro}^{\top}\boldsymbol\beta
+\right)^2
++ \lambda \|\boldsymbol\beta\|_2^2
+$$
+
+The intercept is not penalized. Coefficients are then transformed back to the raw feature
+scale for reporting:
+
+$$
+\hat\beta^{raw}_j = \frac{\hat\beta_j}{s_j}
+$$
+
+$$
+\hat\alpha^{raw}
+=
+\hat\alpha - \sum_j \hat\beta_j\frac{\bar x_j}{s_j}
+$$
+
+Predicted fundamentals share:
+
+$$
+\hat\theta^{fund}_{ro}
+=
+\text{clip}\left(
+y^{previous}_{ro}
++ \hat\alpha^{raw}
++ \mathbf{x}_{ro}^{\top}\hat{\boldsymbol\beta}^{raw},
+\ 0.05,\ 0.95
+\right)
+$$
+
+Shares are normalized within race:
+
+$$
+\tilde\theta^{fund}_{ro}
+=
+\frac{\hat\theta^{fund}_{ro}}
+{\sum_j \hat\theta^{fund}_{rj}}
+$$
+
+Component probability:
+
+$$
+\hat p^{fund}_{ro}
+=
+\Phi\left(
+\frac{\tilde\theta^{fund}_{ro}-0.5}{\sigma_{fund}}
+\right)
+$$
+
+### 5.3 Fallback Model
+
+If the training set is too small, the engine uses explicit handpicked coefficients and
+marks `fit_status` as a fallback:
+
+$$
+\hat\theta^{fund}_{ro}
+= y^{previous}_{ro}
++ \sum_j x_{roj}\beta^{default}_j
+$$
+
+The model card must surface this distinction. A fallback fundamentals row is a usable
+prior, not evidence of a learned structural model.
+
+## 6. Market Model
+
+For an admitted public prediction-market quote:
+
+$$
+p^{mkt}_{ro} \in (0,1)
+$$
+
+Admission gate:
+
+$$
+\mathbb{1}^{mkt}_{ro}
+=
+\mathbb{1}\{
+\text{open\_interest}\ge O_{min}
+\land
+\text{spread}\le S_{max}
+\}
+$$
+
+Probability-to-share proxy:
+
+$$
+\hat\theta^{mkt}_{ro}
+=
+0.5
++ \sigma_{mkt}\Phi^{-1}(p^{mkt}_{ro})
+- b_{FL}
+$$
+
+where `b_FL` is the configured favorite-longshot-bias adjustment. This is a proxy, not a
+market microstructure model. Markets are read-only signals and this repository does not
+trade.
+
+## 7. Public-Signal Model
+
+Public signals are modeled as experimental features:
+
+$$
+\hat p^{signal}_{ro}
+= f_{signal}(\text{news}, \text{pageviews}, \text{official releases}, \ldots)
+$$
+
+Admission policy:
+
+$$
+\text{trusted}_{signal}=1
+\Rightarrow
+\text{leakage checks pass}
+\land
+\text{rolling-origin ablation improves score}
+$$
+
+Default behavior is conservative: compute where data exists, report the value, but keep
+it outside the trusted ensemble unless evidence supports admission.
+
+## 8. Ensemble Model
+
+Let `A_k` be the admission indicator for component `k`, and `w_k` the configured or
+learned component weight.
+
+The component-weighted vote-share signal is:
+
+$$
+\bar\theta_{ro}
+=
+\frac{\sum_k A_k w_k \hat\theta^{(k)}_{ro}}
+{\sum_k A_k w_k}
+$$
+
+Within each race:
+
+$$
+\hat\theta^{ens}_{ro}
+=
+\frac{\bar\theta_{ro}}{\sum_j \bar\theta_{rj}}
+$$
+
+The component-weighted marginal probability is:
+
+$$
+\hat p^{ens}_{ro}
+=
+\frac{\sum_k A_k w_k \hat p^{(k)}_{ro}}
+{\sum_k A_k w_k}
+$$
+
+The component uncertainty proxy is:
+
+$$
+\hat\sigma^{ens}_{ro}
+=
+\frac{\sum_k A_k w_k \hat\sigma^{(k)}_{ro}}
+{\sum_k A_k w_k}
+$$
+
+Important interpretation:
+
+- `hat p^{ens}` is a component-blend diagnostic.
+- The published `winner_probability` comes from simulation draws.
+- Marginal probabilities are not renormalized across options.
+
+Per-race driver attribution is the stored contribution vector:
+
+$$
+C_{rok}
+=
+(w_k,\ \hat p^{(k)}_{ro},\ \hat\theta^{(k)}_{ro},
+\ w_k\hat p^{(k)}_{ro},\ w_k\hat\theta^{(k)}_{ro})
+$$
+
+## 9. Joint Simulation Model
+
+### 9.1 Error Decomposition
+
+For draw `d`, race `r`, and geography `g(r)`, the systematic election error is:
+
+$$
+E^{sys}_{rd}
+=
+N_d
++ G_{g(r)d}
++ R_{\rho(r)d}
++ O_{\omega(r)d}
+$$
+
+where:
+
+$$
+N_d \sim \mathcal{N}(0,\sigma_N^2)
+$$
+
+$$
+\mathbf{G}_d \sim \mathcal{N}(\mathbf{0},\ \Sigma_G)
+$$
+
+$$
+R_{\rho d} \sim \mathcal{N}(0,\sigma_R^2),
+\qquad
+O_{\omega d} \sim \mathcal{N}(0,\sigma_O^2)
+$$
+
+`G` is used when a residual covariance artifact is available. Region and office shocks
+remain additive, so the covariance path does not disable those factor layers.
+
+Local residual:
+
+$$
+L_{rd}
+=
+\frac{\sigma_r}{s_\nu} T_{\nu,rd},
+\qquad
+T_{\nu,rd}\sim t_\nu,
+\qquad
+s_\nu = \sqrt{\frac{\nu}{\nu-2}}
+$$
+
+The scale:
+
+$$
+\sigma_r =
+\max\left(
+\sigma_{tier(T_r)},\ 0.5\hat\sigma^{ens}_{ro}
+\right)
+$$
+
+### 9.2 Two-Option Draws
+
+For binary races, the first sorted option receives:
+
+$$
+\theta^{(d)}_{r1}
+=
+\text{clip}\left(
+\hat\theta^{ens}_{r1}
++ E^{sys}_{rd}
++ L_{rd},
+\ 0.02,\ 0.98
+\right)
+$$
+
+and:
+
+$$
+\theta^{(d)}_{r2}=1-\theta^{(d)}_{r1}
+$$
+
+Winner:
+
+$$
+W^{(d)}_{ro}
+=
+\mathbb{1}\{\theta^{(d)}_{ro}=\max_j\theta^{(d)}_{rj}\}
+$$
+
+### 9.3 Multi-Option Draws
+
+For multi-option races, baseline shares are sampled from a Dirichlet approximation:
+
+$$
+\boldsymbol\pi^{(d)}_r
+\sim
+\text{Dirichlet}(\boldsymbol\alpha_r),
+\qquad
+\alpha_{ro}=\max(70\hat\theta^{ens}_{ro},1)
+$$
+
+The systematic error perturbs centered log shares:
+
+$$
+\ell_{ro}^{(d)} = \log \pi_{ro}^{(d)}
+$$
+
+$$
+\tilde\ell_{ro}^{(d)}
+=
+\ell_{ro}^{(d)}
++ E_{rd}
+\frac{\ell_{ro}^{(d)}-\bar\ell_r^{(d)}}
+{\max(\text{sd}(\boldsymbol\ell_r^{(d)}),10^{-3})}
+$$
+
+Then:
+
+$$
+\theta^{(d)}_{ro}
+=
+\frac{\exp(\tilde\ell_{ro}^{(d)})}
+{\sum_j \exp(\tilde\ell_{rj}^{(d)})}
+$$
+
+This is a practical approximation; ranked-choice and high-dimensional multi-candidate
+models remain future work.
+
+### 9.4 Turnout Draws
+
+The current turnout base is:
+
+$$
+T^{base}_r =
+\text{registered\_voters}_r
+\cdot
+\text{historical\_turnout\_rate}_r
+$$
+
+Draw-level turnout is:
+
+$$
+T^{(d)}_r
+=
+\text{round}\left(
+T^{base}_r \max(0.6, 1+N_d)
+\right)
+$$
+
+This is a projection proxy, not a full demographic turnout model.
+
+## 10. Residual Covariance Estimation
+
+Rolling-origin residuals are:
+
+$$
+e_{cag}
+=
+\frac{1}{|R_{cag}|}
+\sum_{r\in R_{cag}}
+\left(
+\hat\theta^{ens}_{r,a}
+- \theta^{actual}_{r}
+\right)
+$$
+
+where residuals are grouped by cycle `c`, as-of cut `a`, and geography `g`.
+
+The residual matrix is:
+
+$$
+\mathbf{E} \in \mathbb{R}^{n \times G}
+$$
+
+Empirical covariance:
+
+$$
+S = \text{cov}(\mathbf{E})
+$$
+
+Structured target covariance:
+
+$$
+T_{ij}
+=
+\rho_{ij}\sqrt{S_{ii}S_{jj}}
+$$
+
+with:
+
+$$
+\rho_{ij}
+=
+\begin{cases}
+1, & i=j \\
+\rho_{\text{same region}}, & \text{region}(i)=\text{region}(j) \\
+\rho_{\text{cross region}}, & \text{otherwise}
+\end{cases}
+$$
+
+Shrinkage:
+
+$$
+\Sigma_G
+=
+(1-\lambda)S + \lambda T
+$$
+
+Positive-semidefinite projection:
+
+$$
+\Sigma_G = Q\max(\Lambda,\epsilon I)Q^\top
+$$
+
+If fewer than two residual observations exist, no covariance artifact is emitted. The
+simulation then falls back to national, region, office, and local factors.
+
+## 11. Control And Electoral College Outcomes
+
+For control body `b` and party `p`, draw-level seat or electoral-vote count is:
+
+$$
+S^{(d)}_{bp}
+=
+\sum_{r:b(r)=b}
+s_r
+\mathbb{1}\{W^{(d)}_{r,p}=1\}
+$$
+
+where `s_r` is the unit counted by `control_body`:
+
+- House scenarios: House seats.
+- Senate scenarios: Senate seats.
+- Presidential state scenarios: Electoral College votes.
+
+Control threshold:
+
+$$
+\tau_b =
+\begin{cases}
+\text{configured threshold}, & \text{if present} \\
+\lfloor \text{modeled seats}/2 \rfloor + 1, & \text{otherwise}
+\end{cases}
+$$
+
+Control probability:
+
+$$
+\Pr(\text{control}_{bp})
+\approx
+\frac{1}{D}
+\sum_{d=1}^{D}
+\mathbb{1}\{S^{(d)}_{bp}\ge\tau_b\}
+$$
+
+Pivotal indicator for race `r`:
+
+$$
+I^{(d)}_{rbp}
+=
+\mathbb{1}\{
+W^{(d)}_{rp}=1,\ S^{(d)}_{bp}\ge\tau_b,\ S^{(d)}_{bp}-s_r<\tau_b
+\}
+$$
+
+$$
+\quad+
+\mathbb{1}\{
+W^{(d)}_{rp}=0,\ S^{(d)}_{bp}<\tau_b,\ S^{(d)}_{bp}+s_r\ge\tau_b
+\}
+$$
+
+Pivotal rate:
+
+$$
+\text{pivotal}_{rbp}
+=
+\frac{1}{D}\sum_d I^{(d)}_{rbp}
+$$
+
+For presidential scenarios, `tau_president=270` and the count is the full Electoral
+College total when all 50 states plus DC are present.
+
+## 12. Ecosystem Outcomes
+
+Recount proxy:
+
+$$
+\Pr(\text{recount}_r)
+\approx
+\frac{1}{D}\sum_d
+\mathbb{1}\{
+\theta^{(d)}_{r(1)}-\theta^{(d)}_{r(2)} \le 0.01
+\}
+$$
+
+Certification-risk proxy:
+
+$$
+\Pr(\text{certification risk}_r)
+\approx
+0.6
+\cdot
+\frac{1}{D}\sum_d
+\mathbb{1}\{
+\theta^{(d)}_{r(1)}-\theta^{(d)}_{r(2)} \le 0.005
+\}
+$$
+
+The multiplier is explicitly a placeholder. The artifact labels this field as
+`close_margin_proxy_not_calibrated`. It should not be read as a calibrated
+administrative or legal-risk forecast.
+
+Demographic turnout composition is also explicitly marked as not estimated until a
+group-level turnout model is implemented.
+
+## 13. Rolling-Origin Backtesting
+
+For target cycle `c`, the training set is:
+
+$$
+\mathcal{T}_c =
+\{(r,o): \text{cycle}(r) < c\}
+$$
+
+The holdout set is:
+
+$$
+\mathcal{H}_c =
+\{(r,o): \text{cycle}(r) = c\}
+$$
+
+For each as-of offset:
+
+$$
+a_{c,\delta} = \text{ElectionDay}_c - \delta
+$$
+
+the feature bundle is filtered:
+
+$$
+\mathcal{D}_{train}
+=
+\mathcal{D}_{\le a_{c,\delta}}
+\cap
+\mathcal{T}_c
+$$
+
+$$
+\mathcal{D}_{test}
+=
+\mathcal{D}_{\le a_{c,\delta}}
+\cap
+\mathcal{H}_c
+$$
+
+No target-cycle results are available to the component fits.
+
+Default offsets:
+
+$$
+\delta \in \{90,60,30,7,1\}
+$$
+
+when source rows exist by those dates.
+
+## 14. Scoring And Calibration
+
+Brier score:
+
+$$
+\text{Brier}
+=
+\frac{1}{n}\sum_i(\hat p_i-y_i)^2
+$$
+
+Log score:
+
+$$
+\text{LogScore}
+=
+-\frac{1}{n}\sum_i
+\left[
+y_i\log(\hat p_i)
++(1-y_i)\log(1-\hat p_i)
+\right]
+$$
+
+Calibration model:
+
+$$
+\Pr(y_i=1)
+=
+\text{logit}^{-1}
+\left(
+\alpha + \beta\ \text{logit}(\hat p_i)
+\right)
+$$
+
+The implementation estimates `(alpha, beta)` with a small-ridge logistic regression.
+Perfect calibration is approximately:
+
+$$
+\alpha=0,\qquad \beta=1
+$$
+
+Expected calibration error:
+
+$$
+\text{ECE}
+=
+\sum_{b=1}^{B}
+\frac{|I_b|}{n}
+\left|
+\frac{1}{|I_b|}\sum_{i\in I_b}\hat p_i
+-
+\frac{1}{|I_b|}\sum_{i\in I_b}y_i
+\right|
+$$
+
+The current implementation uses quantile-adaptive probability bins when possible.
+
+Interval coverage:
+
+$$
+\text{Coverage}_{90}
+=
+\frac{1}{n}\sum_i
+\mathbb{1}\{L_i^{90}\le y_i^{share}\le U_i^{90}\}
+$$
+
+Baseline probability:
+
+$$
+\hat p^{base}_{ro}
+=
+\Phi\left(
+\frac{y^{previous}_{ro}-0.5}{\sigma_{base}}
+\right)
+$$
+
+`sigma_base` is empirical from prior-cycle residuals once enough rows exist; otherwise
+it falls back to the configured default.
+
+## 15. Component Admission And Rewards
+
+Let `M_min` be the configured minimum rolling-origin row count for trust.
+
+Trustworthy backtest condition:
+
+$$
+\mathbb{1}^{trust}
+=
+\mathbb{1}\{
+\text{rolling\_origin\_executed}
+\land
+n_{rows}\ge M_{min}
+\}
+$$
+
+For component `k`, the ablation check is:
+
+$$
+\Delta_k =
+\text{Brier}_k - \text{Brier}_{baseline}
+$$
+
+Component admission under trustworthy backtests:
+
+$$
+A_k =
+\mathbb{1}\{\Delta_k \le 0\}
+$$
+
+If the backtest sample is too small, the forecast may use configured defaults for
+pragmatic output, but the reward card must mark evidence-based admission as not
+certified.
+
+Reward interpretation:
+
+- `R4`: calibration metrics are reported.
+- `R5`: ensemble beats or matches baseline with enough rows.
+- `R6`: component admission is evidence-based with enough rows.
+- `R8`: interval coverage is within tolerance with enough rows.
+
+## 16. Historical Result Comparison
+
+A completed-cycle comparison joins a forecast run to actual results:
+
+$$
+\text{comparison}_{ro}
+=
+(\hat p_{ro}, \hat\theta_{ro}, y^{actual}_{ro}, W^{actual}_{ro})
+$$
+
+Race-level state accuracy:
+
+$$
+\text{Accuracy}
+=
+\frac{1}{R}\sum_r
+\mathbb{1}\{
+\arg\max_o \hat p_{ro}
+=
+\arg\max_o W^{actual}_{ro}
+\}
+$$
+
+Vote-share mean absolute error:
+
+$$
+\text{MAE}
+=
+\frac{1}{n}\sum_{ro}
+|\hat\theta_{ro}-y^{actual}_{ro}|
+$$
+
+Presidential EC winner accuracy compares the modeled Electoral College winner with the
+actual winner only when the scenario contains all 538 electoral votes. Otherwise the
+comparison is labeled as a modeled slice.
+
+## 17. Diagnostics And Plot Contract
+
+The diagnostics page should make the distributional claims visible before lower-level
+details:
+
+1. Top-line win/control probabilities and EC distribution.
+2. Simulation swarm or draw trace next to the histogram.
+3. State/race probability and margin tables.
+4. Driver attribution by race.
+5. Calibration and interval coverage.
+6. Model-quality section with Kalman trajectory diagnostics, chain-style draw traces,
+   convergence plots, residual covariance summaries, and benchmark scores.
 
 Plot families:
 
-- Calibration curve.
-- Brier by component.
+- Electoral College distribution.
+- Simulation swarm and chain-style EC traces.
+- Winner probability bars.
+- Vote-share interval projections.
+- Polling trajectories with dots and posterior bands.
+- Calibration curve and ECE.
 - Interval coverage.
-- Race winner probabilities.
-- Vote-share intervals.
-- Seat/control projections.
-- Turnout and recount-risk projection.
-- Tier coverage.
+- Brier/log score by component.
+- Cross-cycle cycle-eval summaries.
+- Silver/FiveThirtyEight methodology-readiness benchmark.
 
-The HTML diagnostics page embeds these visuals and includes reward state, scorecards,
-source counts, and backtest payloads.
+## 18. Performance Model
 
-Forecast runs also write `reproducibility_fingerprint.json`. The fingerprint hashes
-stable table/text/JSON artifacts while excluding volatile retrieval timestamp and
-incremental-sync status fields. `R1_reproducibility` passes only when a later run with
-the same `run_id` matches the previous stable fingerprint; a first run records the hash
-but is not by itself proof of rerun reproducibility.
+The expensive loop is draw generation. The optimized binary-race path is:
 
-```mermaid
-flowchart TD
-    forecast[/"forecast artifacts"/]
-    backtest[/"backtest metrics"/]
-    plots[/"PNG plots"/]
-    rewards[/"reward_card.json"/]
-    html["diagnostics.html"]
+$$
+(\hat\theta, T^{base}, N, L)
+\rightarrow
+\{\theta^{(d)}_{ro}, W^{(d)}_{ro}, T^{(d)}_r\}_{d=1}^{D}
+$$
 
-    forecast --> plots
-    backtest --> plots
-    forecast --> rewards
-    backtest --> rewards
-    plots --> html
-    rewards --> html
-```
+Implementation policy:
 
-## 9. Performance Approach
+- Polars/DuckDB for table transforms.
+- NumPy for dense arrays.
+- Numba parallel kernels for repeated draw-level loops.
+- Python fallback when Numba is unavailable.
 
-Performance policy:
+`performance.json` records:
 
-- Use Polars and DuckDB for table-oriented work.
-- Use NumPy arrays for draw-level numerical buffers.
-- Use Numba for repeated CPU-bound numerical loops.
-- Preserve Python fallback behavior for platforms where acceleration is unavailable.
-- Benchmark simulation and scoring changes.
+$$
+(\text{requested engine}, \text{actual engine}, \text{parallel flag},
+\text{Numba availability}, \text{thread count}, D)
+$$
 
-Current accelerated path:
+`R12_performance_contract` verifies the requested acceleration path is recorded and that
+Numba is used when requested and available.
 
-```text
-SimulationEngine
-  -> collect binary race specs
-  -> build dense NumPy arrays
-  -> call Numba parallel binary_draw_kernel
-  -> map integer race/option ids back to Parquet-ready labels
-```
+## 19. Current Status Versus Frontier Target
 
-Forecast runs write:
+Implemented:
 
-```text
-performance.json
-```
+- Fixture-backed and presidential-panel forecasting contract.
+- Source manifest and row-level forecast lineage.
+- Tier A/B/C sparse-race gates.
+- Deterministic Kalman polling with empirical-Bayes house-effect shrinkage.
+- Standardized ridge fundamentals when enough rows exist.
+- Market inverse-normal share proxy with liquidity/spread gates.
+- Weighted ensemble with contribution attribution.
+- Correlated simulation with national, geography covariance, region, office, and
+  heavy-tailed local errors.
+- Electoral College control threshold and pivotal-rate calculation.
+- Rolling-origin backtesting across cycles and as-of offsets.
+- Calibration, interval coverage, result comparison, and cycle-eval dashboards.
+- Numba binary simulation path with Python fallback.
 
-Benchmark runs write:
+Still not frontier:
 
-```text
-artifacts/benchmarks/<run_id>/performance_benchmark.json
-```
+- No full posterior MCMC/SMC over all polling and election-error parameters.
+- No hierarchical Bayesian fundamentals prior.
+- No calibrated legal/process model for certification risk.
+- No group-level demographic turnout model.
+- No real-time nationwide live adapter coverage across every public data source.
+- Multi-option and ranked-choice models remain approximations.
 
-The performance reward `R12_performance_contract` verifies that the run records the
-requested engine, actual engine, parallel mode, Numba availability, thread count, and
-simulation count.
+The immediate modeling target is not to hide these gaps. It is to make each approximation
+measurable, benchmarked, and replaceable behind stable artifacts.
 
-## 10. Source Expansion Path
+## 20. Acceptance Standard
 
-The fixture-backed implementation is designed to make live ingestion incremental rather
-than disruptive.
-
-Adapter expansion order:
-
-1. Poll feeds and pollster metadata.
-2. Election returns and official race metadata.
-3. FEC finance data.
-4. Census/BLS/BEA fundamentals.
-5. Public market data.
-6. Public attention/news/pageview signals.
-
-Each adapter must:
-
-- Record raw payloads or stable downloaded files.
-- Hash content.
-- Preserve parser version.
-- Record auth mode and terms/rate-limit assumptions.
-- Fail visibly in the source manifest.
-- Produce curated tables compatible with the existing feature layer.
-
-## 11. Limitations
-
-Current limitations:
-
-- Fixture-backed data, not live data.
-- Deterministic component models, not full Bayesian estimation yet.
-- Static ensemble weights.
-- Simplified market and public-signal handling.
-- Two-option simulation has the optimized Numba path; multi-option/ranked-choice paths
-  still use simpler logic.
-- Certification and recount risks are close-margin proxies, not full legal/process
-  models.
-
-These limitations are acceptable for the scaffold because the artifact, reward,
-diagnostic, and performance contracts are already testable.
-
-## 12. Acceptance Standard
-
-The repo is acceptable only when:
+Documentation changes do not alter the acceptance gate. A valid repo state must pass:
 
 ```bash
 uv sync
 chflags -R nohidden .venv
 uv run ruff check
 uv run ruff format --check
-uv run pytest --cov=src/election_outcomes --cov-fail-under=90
-```
-
-A complete diagnostic run should include:
-
-```bash
-uv run election-outcomes forecast run --as-of 2026-05-08 --run-id full-diagnostic
-uv run election-outcomes backtest run --run-id full-diagnostic-backtest
-uv run election-outcomes benchmark run --as-of 2026-05-08 --run-id full-diagnostic-perf
+PYTHONPATH=src uv run pytest --cov=src/election_outcomes --cov-fail-under=90
 ```
