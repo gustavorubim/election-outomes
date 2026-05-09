@@ -377,6 +377,22 @@ scenarios:
       DEM: 28
       REP: 38
       IND: 1
+  senate_2026_state:
+    description: 2026 U.S. Senate midterm forecast (no actuals available).
+    family: senate_state
+    cycle: 2026
+    office_type: senate
+    geography_type: state
+    control_body: senate
+    election_date: "2026-11-03"
+    default_as_of: "2026-11-02"
+    senate_class: II
+    # 2024 outcome carried forward: DEM 47, REP 53 (incl. IND caucusing). Class I + III
+    # senators who are NOT up in 2026 form holdovers.
+    holdovers:
+      DEM: 32
+      REP: 33
+      IND: 2
 
   # ---------------- House district-level scenarios ----------------
   house_district:
@@ -443,4 +459,14 @@ scenarios:
     control_body: house
     election_date: "2024-11-05"
     default_as_of: "2024-11-04"
+    redistricting_era: "2022_plus"
+  house_2026_district:
+    description: 2026 U.S. House midterm forecast (no actuals available).
+    family: house_district
+    cycle: 2026
+    office_type: house
+    geography_type: district
+    control_body: house
+    election_date: "2026-11-03"
+    default_as_of: "2026-11-02"
     redistricting_era: "2022_plus"

@@ -16,8 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "fixtures" / "senate_state_panel.csv"
 
-CYCLES: list[int] = [2014, 2016, 2018, 2020, 2022, 2024]
-FORECAST_ONLY_CYCLES: set[int] = set()
+CYCLES: list[int] = [2014, 2016, 2018, 2020, 2022, 2024, 2026]
+FORECAST_ONLY_CYCLES: set[int] = {2026}
 
 # Senate Class assignments. Class I up in 2024/2018/2012; Class II up in 2020/2014/2008;
 # Class III up in 2022/2016/2010. Source: Senate.gov.
@@ -135,6 +135,7 @@ CYCLE_TO_CLASS: dict[int, list[str]] = {
     2020: CLASS_II,
     2022: CLASS_III,
     2024: CLASS_I,
+    2026: CLASS_II,
 }
 
 CYCLE_CLASS_LABEL: dict[int, str] = {
@@ -144,6 +145,7 @@ CYCLE_CLASS_LABEL: dict[int, str] = {
     2020: "II",
     2022: "III",
     2024: "I",
+    2026: "II",
 }
 
 ELECTION_DATE: dict[int, str] = {
@@ -153,6 +155,7 @@ ELECTION_DATE: dict[int, str] = {
     2020: "2020-11-03",
     2022: "2022-11-08",
     2024: "2024-11-05",
+    2026: "2026-11-03",
 }
 
 # Approximate state partisan lean in pp (D positive). Calibrated from public sources
@@ -273,6 +276,9 @@ CYCLE_D_ENVIRONMENT: dict[int, float] = {
     2020: +1.0,
     2022: +1.5,
     2024: -2.5,
+    # 2026 midterm under R presidency; out-party historical advantage. Replace with a
+    # poll-aggregate value once a real polling adapter is wired in.
+    2026: +3.0,
 }
 
 # Approximate D economic index per cycle (synthetic).
@@ -283,6 +289,7 @@ CYCLE_ECONOMY: dict[int, float] = {
     2020: -0.3,
     2022: -0.4,
     2024: -0.2,
+    2026: -0.1,
 }
 
 # Pseudo-incumbents: states where the 2010-baseline incumbent party is locked in.
@@ -447,6 +454,7 @@ def _generate_row(cycle: int, state: str) -> dict[str, object]:
         2_500_000 + abs(state_lean_pp) * 80_000 * rng.random() + 1_000_000 * rng.random()
     )
 
+    forecast_only = cycle in FORECAST_ONLY_CYCLES
     race_id = f"US-SEN-{state}-{cycle}"
     return {
         "cycle": cycle,
@@ -462,10 +470,10 @@ def _generate_row(cycle: int, state: str) -> dict[str, object]:
         "rep_previous_vote_share": previous_r,
         "dem_fundraising_usd": dem_fundraising,
         "rep_fundraising_usd": rep_fundraising,
-        "dem_vote_share": actual_d,
-        "rep_vote_share": actual_r,
-        "turnout": turnout,
-        "winner_party": "DEM" if actual_d > actual_r else "REP",
+        "dem_vote_share": "" if forecast_only else actual_d,
+        "rep_vote_share": "" if forecast_only else actual_r,
+        "turnout": "" if forecast_only else turnout,
+        "winner_party": "" if forecast_only else ("DEM" if actual_d > actual_r else "REP"),
         "partisan_lean": round(state_lean_pp, 4),
         "incumbency_advantage": incumbent_advantage if incumbent_party != "" else 0.0,
         "economic_index": round(CYCLE_ECONOMY[cycle], 4),

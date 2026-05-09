@@ -24,8 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "fixtures" / "house_district_panel.csv"
 
-CYCLES: list[int] = [2014, 2016, 2018, 2020, 2022, 2024]
-FORECAST_ONLY_CYCLES: set[int] = set()
+CYCLES: list[int] = [2014, 2016, 2018, 2020, 2022, 2024, 2026]
+FORECAST_ONLY_CYCLES: set[int] = {2026}
 ELECTION_DATE: dict[int, str] = {
     2014: "2014-11-04",
     2016: "2016-11-08",
@@ -33,6 +33,7 @@ ELECTION_DATE: dict[int, str] = {
     2020: "2020-11-03",
     2022: "2022-11-08",
     2024: "2024-11-05",
+    2026: "2026-11-03",
 }
 
 REDISTRICTING_ERA: dict[int, str] = {
@@ -42,6 +43,7 @@ REDISTRICTING_ERA: dict[int, str] = {
     2020: "2012_2020",
     2022: "2022_plus",
     2024: "2022_plus",
+    2026: "2022_plus",
 }
 
 # Approximate cycle-level D environment (House popular vote bias).
@@ -52,6 +54,9 @@ CYCLE_D_ENVIRONMENT: dict[int, float] = {
     2020: +3.0,  # D edge
     2022: -2.0,  # R edge
     2024: -2.5,  # R edge
+    # 2026 midterm under R presidency; out-party midterm advantage. Replace with a
+    # poll-aggregate value once a real polling adapter is wired in.
+    2026: +4.0,
 }
 
 CYCLE_ECONOMY: dict[int, float] = {
@@ -61,6 +66,7 @@ CYCLE_ECONOMY: dict[int, float] = {
     2020: -0.3,
     2022: -0.4,
     2024: -0.2,
+    2026: -0.1,
 }
 
 # House delegation size per state (435 total). Approximate post-2010 census, used for
@@ -317,10 +323,12 @@ def _generate_row(cycle: int, state: str, district: int) -> dict[str, object]:
         "rep_previous_vote_share": previous_r,
         "dem_fundraising_usd": dem_fundraising,
         "rep_fundraising_usd": rep_fundraising,
-        "dem_vote_share": actual_d,
-        "rep_vote_share": actual_r,
-        "turnout": turnout,
-        "winner_party": "DEM" if actual_d > actual_r else "REP",
+        "dem_vote_share": "" if cycle in FORECAST_ONLY_CYCLES else actual_d,
+        "rep_vote_share": "" if cycle in FORECAST_ONLY_CYCLES else actual_r,
+        "turnout": "" if cycle in FORECAST_ONLY_CYCLES else turnout,
+        "winner_party": ""
+        if cycle in FORECAST_ONLY_CYCLES
+        else ("DEM" if actual_d > actual_r else "REP"),
         "partisan_lean": pvi,
         "incumbency_advantage": incumbent_advantage,
         "economic_index": round(CYCLE_ECONOMY[cycle], 4),
