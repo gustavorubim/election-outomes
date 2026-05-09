@@ -147,6 +147,24 @@ accuracy, Brier score, vote-share error, upsets, missed states, and links to eac
 cycle's diagnostics and comparison report. It also retains the deterministic
 state-topline EC winner from `results compare` as an audit field.
 
+### Current Historical Accuracy Snapshot
+
+The latest checked-in workflow artifacts report the following same-date historical
+accuracy. Treat race/state winner accuracy and chamber-control accuracy as separate
+claims: House district calls are mostly safe seats, while House chamber control remains
+fragile in the current fixture-backed panel.
+
+| Scope | Historical cycles | Race/state winner accuracy | Topline winner accuracy | Mean Brier | Vote-share MAE |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Presidential | 2008, 2012, 2016, 2020, 2024 | 90.6% | 100.0% EC winner | 0.0741 | 2.74 pts |
+| Senate | 2014, 2016, 2018, 2020, 2022, 2024 | 98.5% | 100.0% chamber winner | 0.0262 | 1.50 pts |
+| House | 2014, 2016, 2018, 2020, 2022, 2024 | 98.4% | 66.7% chamber winner | 0.0239 | 2.68 pts |
+
+Interpretation: the current system is a strong race-level classifier on these
+deterministic panels and has reasonable Brier scores, but the House aggregate control
+call should not be treated as highly reliable until more real-data validation and
+cross-cycle stress testing are added.
+
 ## 2024 Presidential Benchmark
 
 Run the 2024 presidential scenario at the default pre-election date:
