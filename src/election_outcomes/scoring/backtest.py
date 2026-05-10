@@ -16,6 +16,8 @@ from election_outcomes.features import (
     filter_results_before_cycle,
     subset_bundle,
 )
+from election_outcomes.inference.hyperpriors import search_hyperpriors
+from election_outcomes.inference.recalibration import recalibration_map_from_calibration
 from election_outcomes.models import (
     EnsembleModel,
     FundamentalsModel,
@@ -24,6 +26,7 @@ from election_outcomes.models import (
     PublicSignalModel,
 )
 from election_outcomes.models.common import clamp, normal_cdf
+from election_outcomes.models.polling import resolve_inference_engine
 from election_outcomes.scoring.learning import (
     apply_platt_calibration,
     fit_platt_calibration,
@@ -40,6 +43,7 @@ class BacktestArtifacts:
     rolling_predictions: pl.DataFrame
     component_admission: dict[str, Any]
     residual_covariance: pl.DataFrame
+    recalibration_map: pl.DataFrame
 
 
 class BacktestRunner:
@@ -76,17 +80,38 @@ class BacktestRunner:
         scenario: str | None = None,
         start_cycle: int | None = None,
         holdout_cycle: int | None = None,
+        inference_engine: str | None = None,
+        bayesian_backend: str | None = None,
     ) -> dict[str, object]:
-        return self._evaluate(scenario, start_cycle, holdout_cycle).payload
+        return self._evaluate(
+            scenario,
+            start_cycle,
+            holdout_cycle,
+            inference_engine,
+            bayesian_backend,
+        ).payload
 
     def _evaluate(
         self,
         scenario: str | None = None,
         start_cycle: int | None = None,
         holdout_cycle: int | None = None,
+        inference_engine: str | None = None,
+        bayesian_backend: str | None = None,
     ) -> BacktestArtifacts:
         bundle = FeatureBuilder(self.context).run()
         model_config = self.context.read_yaml("model.yaml")
+        inference_engine = resolve_inference_engine(model_config, inference_engine)
+        if inference_engine != "kalman":
+            model_config = json.loads(json.dumps(model_config))
+            model_config["_inference_engine"] = inference_engine
+            if bayesian_backend:
+                model_config["_bayesian_backend"] = bayesian_backend.lower().strip()
+        resolved_bayesian_backend = (
+            model_config.get("_bayesian_backend") or model_config.get("bayesian", {}).get("backend")
+            if inference_engine == "bayes"
+            else None
+        )
         backtest_config = self.context.read_yaml("backtests.yaml")
         scenario_obj = ScenarioRegistry.from_context(self.context).get(scenario)
         rolling_predictions = self._rolling_origin_predictions(
@@ -96,6 +121,7 @@ class BacktestRunner:
             scenario=scenario_obj,
             start_cycle=start_cycle,
             holdout_cycle=holdout_cycle,
+            inference_engine=inference_engine,
         )
         minimum_rows = int(backtest_config.get("minimum_rows_for_trust", 30))
         rolling = self._rolling_origin_summary(rolling_predictions)
@@ -122,9 +148,12 @@ class BacktestRunner:
         metrics = self._score_columns(rolling_predictions, self.COMPONENT_COLUMNS)
         ablations = self._ablations(metrics)
         rolling = self._rolling_origin_summary(rolling_predictions)
+        hyperprior_search = search_hyperpriors(rolling_predictions, model_config)
         payload: dict[str, Any] = {
             "generated_at": datetime.now(UTC).isoformat(),
             "method": "rolling_origin_component_refit",
+            "inference_engine": inference_engine,
+            "bayesian_backend": resolved_bayesian_backend,
             "scenario": scenario,
             "start_cycle": start_cycle,
             "holdout_cycle": holdout_cycle,
@@ -137,7 +166,21 @@ class BacktestRunner:
             "ablations": ablations,
             "ensemble_learning": ensemble_learning["weight_learning"],
             "probability_calibration": ensemble_learning["probability_calibration"],
+            "bayesian_hyperpriors": hyperprior_search,
         }
+        recalibration_map = recalibration_map_from_calibration(
+            ensemble_learning["probability_calibration"],
+            cycles=rolling["cycles"],
+            as_of_cuts=sorted(
+                int(value)
+                for value in rolling_predictions["as_of_offset_days"]
+                .drop_nulls()
+                .unique()
+                .to_list()
+            )
+            if "as_of_offset_days" in rolling_predictions.columns
+            else [],
+        ).to_frame()
         component_admission = self._component_admission(
             payload=payload,
             ablations=ablations,
@@ -147,7 +190,13 @@ class BacktestRunner:
             ensemble_learning=ensemble_learning,
         )
         covariance = self._residual_covariance(rolling_predictions, model_config)
-        return BacktestArtifacts(payload, rolling_predictions, component_admission, covariance)
+        return BacktestArtifacts(
+            payload,
+            rolling_predictions,
+            component_admission,
+            covariance,
+            recalibration_map,
+        )
 
     def _rolling_origin_predictions(
         self,
@@ -157,6 +206,7 @@ class BacktestRunner:
         scenario: Scenario | None,
         start_cycle: int | None,
         holdout_cycle: int | None,
+        inference_engine: str,
     ) -> pl.DataFrame:
         base_catalog = (
             scenario.filter_catalog(bundle.race_catalog, include_cycle=False)
@@ -190,6 +240,7 @@ class BacktestRunner:
                     as_of=as_of,
                     as_of_offset_days=offset_days,
                     model_config=model_config,
+                    inference_engine=inference_engine,
                 )
                 if not predictions.is_empty():
                     frames.append(predictions)
@@ -203,22 +254,35 @@ class BacktestRunner:
         as_of: str,
         as_of_offset_days: int,
         model_config: dict[str, Any],
+        inference_engine: str,
     ) -> pl.DataFrame:
         train_bundle = filter_results_before_cycle(train_bundle, target_cycle)
         fundamentals_model = FundamentalsModel(model_config).fit(train_bundle)
+        cycle_model_config = json.loads(json.dumps(model_config))
+        if inference_engine == "bayes":
+            from election_outcomes.inference.fundamentals_prior import build_fundamentals_prior
+
+            fundamentals_prior = build_fundamentals_prior(
+                fundamentals_model, test_bundle, cycle_model_config
+            )
+            cycle_model_config["_fundamentals_prior_rows"] = fundamentals_prior.frame.to_dicts()
         component_estimates = [
-            PollingModel(model_config, as_of=as_of).run(test_bundle),
+            PollingModel(
+                cycle_model_config,
+                as_of=as_of,
+                inference_engine=inference_engine,
+            ).run(test_bundle),
             fundamentals_model.run(test_bundle),
-            MarketModel(model_config).run(test_bundle),
+            MarketModel(cycle_model_config).run(test_bundle),
             PublicSignalModel(
                 trusted=bool(
-                    model_config.get("trusted_components", {}).get("public_signals", False)
+                    cycle_model_config.get("trusted_components", {}).get("public_signals", False)
                 )
             ).run(test_bundle),
         ]
         if all(frame.is_empty() for frame in component_estimates):
             return self._empty_predictions()
-        ensemble = EnsembleModel(model_config).run(test_bundle, component_estimates)
+        ensemble = EnsembleModel(cycle_model_config).run(test_bundle, component_estimates)
         rows: list[dict[str, Any]] = []
         actuals = {
             (row["race_id"], row["option_id"]): row
@@ -249,6 +313,7 @@ class BacktestRunner:
                 "cycle": target_cycle,
                 "as_of": as_of,
                 "as_of_offset_days": as_of_offset_days,
+                "polling_inference_engine": inference_engine,
                 "geography": race.get("geography"),
                 "office_type": race.get("office_type"),
                 "option_id": option["option_id"],
@@ -379,7 +444,7 @@ class BacktestRunner:
                 "row_count": frame.height,
                 "ridge": float(settings.get("calibration_ridge", 1e-3)),
                 "min_slope": float(settings.get("calibration_min_slope", 0.25)),
-                "max_slope": float(settings.get("calibration_max_slope", 4.0)),
+                "max_slope": float(settings.get("calibration_max_slope", 2.0)),
                 "max_abs_intercept": float(settings.get("calibration_max_abs_intercept", 2.0)),
             }
             return {
@@ -410,7 +475,7 @@ class BacktestRunner:
             min_rows=minimum_rows,
             ridge=float(settings.get("calibration_ridge", 1e-3)),
             min_slope=float(settings.get("calibration_min_slope", 0.25)),
-            max_slope=float(settings.get("calibration_max_slope", 4.0)),
+            max_slope=float(settings.get("calibration_max_slope", 2.0)),
             max_abs_intercept=float(settings.get("calibration_max_abs_intercept", 2.0)),
         )
         calibration["input_probability"] = "learned_ensemble_probability"
@@ -559,6 +624,7 @@ class BacktestRunner:
             "configured_component_weights": dict(model_config.get("component_weights", {})),
             "ensemble_learning": weight_learning,
             "probability_calibration": probability_calibration,
+            "bayesian_hyperpriors": payload.get("bayesian_hyperpriors", {}),
             "ablations": ablations,
             "minimum_rows_for_trust": payload["minimum_rows_for_trust"],
             "row_count": payload["row_count"],
@@ -687,6 +753,7 @@ class BacktestRunner:
                 "cycle": pl.Int64,
                 "as_of": pl.Utf8,
                 "as_of_offset_days": pl.Int64,
+                "polling_inference_engine": pl.Utf8,
                 "geography": pl.Utf8,
                 "office_type": pl.Utf8,
                 "option_id": pl.Utf8,
@@ -714,8 +781,16 @@ class BacktestRunner:
         scenario: str | None = None,
         start_cycle: int | None = None,
         holdout_cycle: int | None = None,
+        inference_engine: str | None = None,
+        bayesian_backend: str | None = None,
     ) -> dict[str, object]:
-        artifacts = self._evaluate(scenario, start_cycle, holdout_cycle)
+        artifacts = self._evaluate(
+            scenario,
+            start_cycle,
+            holdout_cycle,
+            inference_engine,
+            bayesian_backend,
+        )
         out_dir = self.context.artifacts_dir / "backtests" / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         metrics_rows = [
@@ -731,11 +806,14 @@ class BacktestRunner:
             artifacts.payload["probability_calibration"],
             out_dir / "probability_calibration.json",
         )
+        write_json(artifacts.payload["bayesian_hyperpriors"], out_dir / "bayesian_hyperpriors.json")
+        write_parquet(artifacts.recalibration_map, out_dir / "recalibration_map.parquet")
         write_parquet(artifacts.residual_covariance, out_dir / "residual_covariance.parquet")
         self._write_latest_artifacts(
             scenario=scenario,
             component_admission=artifacts.component_admission,
             residual_covariance=artifacts.residual_covariance,
+            recalibration_map=artifacts.recalibration_map,
         )
         return artifacts.payload
 
@@ -744,6 +822,7 @@ class BacktestRunner:
         scenario: str | None,
         component_admission: dict[str, Any],
         residual_covariance: pl.DataFrame,
+        recalibration_map: pl.DataFrame,
     ) -> None:
         key = component_admission.get("scenario_family") or scenario or "default"
         latest_dir = self.context.artifacts_dir / "backtests" / "latest"
@@ -756,6 +835,11 @@ class BacktestRunner:
             component_admission.get("probability_calibration", {}),
             latest_dir / f"probability_calibration_{key}.json",
         )
+        write_json(
+            component_admission.get("bayesian_hyperpriors", {}),
+            latest_dir / f"bayesian_hyperpriors_{key}.json",
+        )
+        write_parquet(recalibration_map, latest_dir / f"recalibration_map_{key}.parquet")
         write_parquet(residual_covariance, latest_dir / f"residual_covariance_{key}.parquet")
         index_path = latest_dir / "index.json"
         index = {}
@@ -768,6 +852,8 @@ class BacktestRunner:
             "component_admission": f"component_admission_{key}.json",
             "ensemble_learning": f"ensemble_learning_{key}.json",
             "probability_calibration": f"probability_calibration_{key}.json",
+            "bayesian_hyperpriors": f"bayesian_hyperpriors_{key}.json",
+            "recalibration_map": f"recalibration_map_{key}.parquet",
             "residual_covariance": f"residual_covariance_{key}.parquet",
         }
         write_json(index, index_path)

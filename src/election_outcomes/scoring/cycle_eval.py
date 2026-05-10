@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -113,12 +114,13 @@ class CycleEvaluationReport:
         rows = frame.sort("cycle")
         fig, ax = plt.subplots(figsize=(8.8, 4.8), dpi=150)
         colors = [
-            "#2b6cb0" if party == "DEM" else "#c43b3b"
+            "#2b6cb0" if party == "DEM" else "#c43b3b" if party == "REP" else "#8a8f98"
             for party in rows["forecast_ec_winner_party"].to_list()
         ]
+        probabilities = CycleEvaluationReport._numeric_values(rows, "forecast_ec_win_probability")
         ax.bar(
             [str(cycle) for cycle in rows["cycle"].to_list()],
-            rows["forecast_ec_win_probability"].to_list(),
+            probabilities,
             color=colors,
         )
         ax.set_ylim(0, 1)
@@ -147,15 +149,17 @@ class CycleEvaluationReport:
         rows = frame.sort("cycle")
         x_labels = [str(cycle) for cycle in rows["cycle"].to_list()]
         x = range(len(x_labels))
+        accuracy = CycleEvaluationReport._numeric_values(rows, "state_accuracy")
+        brier = CycleEvaluationReport._numeric_values(rows, "brier_score")
         fig, ax = plt.subplots(figsize=(8.8, 4.8), dpi=150)
         ax.plot(
             x,
-            rows["state_accuracy"].to_list(),
+            accuracy,
             marker="o",
             color="#245b8f",
             label=f"{race_label} accuracy",
         )
-        ax.plot(x, rows["brier_score"].to_list(), marker="s", color="#9c6f19", label="Brier score")
+        ax.plot(x, brier, marker="s", color="#9c6f19", label="Brier score")
         ax.set_xticks(list(x), x_labels)
         ax.set_ylim(0, 1)
         ax.set_title(
@@ -181,12 +185,14 @@ class CycleEvaluationReport:
         rows = frame.sort("cycle")
         x_labels = [str(cycle) for cycle in rows["cycle"].to_list()]
         x = list(range(len(x_labels)))
+        errors = CycleEvaluationReport._numeric_values(rows, "mean_absolute_vote_share_error")
+        upsets = CycleEvaluationReport._numeric_values(rows, "upset_count")
         fig, ax = plt.subplots(figsize=(8.8, 4.8), dpi=150)
-        ax.bar(x, rows["mean_absolute_vote_share_error"].to_list(), color="#547c70")
+        ax.bar(x, errors, color="#547c70")
         ax.set_ylabel("Vote-share MAE")
         ax.set_xticks(x, x_labels)
         ax2 = ax.twinx()
-        ax2.plot(x, rows["upset_count"].to_list(), color="#c43b3b", marker="o", label="Upsets")
+        ax2.plot(x, upsets, color="#c43b3b", marker="o", label="Upsets")
         ax2.set_ylabel("Upset count")
         ax.set_title(
             f"{chamber} Error And Upsets By Cycle",
@@ -430,15 +436,36 @@ class CycleEvaluationReport:
 
     @staticmethod
     def _pct(value: Any) -> str:
-        if value is None:
+        numeric = CycleEvaluationReport._coerce_numeric(value)
+        if numeric is None:
             return "n/a"
-        return f"{float(value) * 100:.1f}%"
+        return f"{numeric * 100:.1f}%"
 
     @staticmethod
     def _num(value: Any, digits: int) -> str:
-        if value is None:
+        numeric = CycleEvaluationReport._coerce_numeric(value)
+        if numeric is None:
             return "n/a"
-        return f"{float(value):.{digits}f}"
+        return f"{numeric:.{digits}f}"
+
+    @staticmethod
+    def _numeric_values(frame: pl.DataFrame, column: str) -> list[float]:
+        return [
+            numeric
+            if (numeric := CycleEvaluationReport._coerce_numeric(value)) is not None
+            else math.nan
+            for value in frame[column].to_list()
+        ]
+
+    @staticmethod
+    def _coerce_numeric(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if math.isfinite(numeric) else None
 
     @staticmethod
     def _css() -> str:

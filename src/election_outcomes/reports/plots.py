@@ -45,6 +45,9 @@ class PlotGenerator:
         backtest_payload: dict[str, Any],
         methodology_benchmark: dict[str, Any] | None = None,
         poll_trajectory: pl.DataFrame | None = None,
+        posterior_draws: pl.DataFrame | None = None,
+        posterior_diagnostics: dict[str, Any] | None = None,
+        fundamentals_prior: pl.DataFrame | None = None,
     ) -> dict[str, list[dict[str, str]]]:
         plot_dir = artifact_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
@@ -56,6 +59,8 @@ class PlotGenerator:
             "drivers": [],
             "stability": [],
             "model_quality": [],
+            "posterior": [],
+            "fundamentals_prior": [],
             "benchmark": [],
         }
         self._add(
@@ -184,6 +189,28 @@ class PlotGenerator:
         )
         self._add(
             manifest,
+            "posterior",
+            self._posterior_share_intervals(
+                plot_dir, posterior_draws if posterior_draws is not None else pl.DataFrame()
+            ),
+            "Bayesian latent vote-share posterior intervals",
+        )
+        self._add(
+            manifest,
+            "posterior",
+            self._posterior_diagnostic_bars(plot_dir, posterior_diagnostics or {}),
+            "Bayesian posterior diagnostics",
+        )
+        self._add(
+            manifest,
+            "fundamentals_prior",
+            self._fundamentals_prior_intervals(
+                plot_dir, fundamentals_prior if fundamentals_prior is not None else pl.DataFrame()
+            ),
+            "Fundamentals prior intervals",
+        )
+        self._add(
+            manifest,
             "benchmark",
             self._methodology_benchmark(plot_dir, methodology_benchmark or {}),
             "Silver/FiveThirtyEight methodology benchmark",
@@ -293,6 +320,8 @@ class PlotGenerator:
         return self._save(fig, plot_dir / "interval_coverage.png")
 
     def _race_probability_bars(self, plot_dir: Path, race_forecasts: pl.DataFrame) -> Path | None:
+        if race_forecasts.is_empty() or "winner_probability" not in race_forecasts.columns:
+            return None
         frame = race_forecasts.filter(pl.col("winner_probability").is_not_null())
         if frame.is_empty():
             return None
@@ -324,9 +353,11 @@ class PlotGenerator:
         return self._save(fig, plot_dir / "race_probability_bars.png")
 
     def _vote_share_intervals(self, plot_dir: Path, race_forecasts: pl.DataFrame) -> Path | None:
-        frame = race_forecasts.filter(pl.col("vote_share_mean").is_not_null())
         required = {"vote_share_mean", "vote_share_p05", "vote_share_p95"}
-        if frame.is_empty() or not required.issubset(set(frame.columns)):
+        if race_forecasts.is_empty() or not required.issubset(set(race_forecasts.columns)):
+            return None
+        frame = race_forecasts.filter(pl.col("vote_share_mean").is_not_null())
+        if frame.is_empty():
             return None
         sorted_frame = (
             frame.with_columns((pl.col("vote_share_mean") - 0.5).abs().alias("_distance"))
@@ -831,6 +862,124 @@ class PlotGenerator:
         ax.legend(loc="best", frameon=False, fontsize=7)
         self._style_axis(ax)
         return self._save(fig, plot_dir / "kalman_posterior_uncertainty.png")
+
+    def _posterior_share_intervals(
+        self, plot_dir: Path, posterior_draws: pl.DataFrame
+    ) -> Path | None:
+        required = {"race_id", "option_id", "latent_share"}
+        if posterior_draws.is_empty() or not required.issubset(posterior_draws.columns):
+            return None
+        summary = (
+            posterior_draws.group_by(["race_id", "option_id"])
+            .agg(
+                pl.col("latent_share").mean().alias("mean"),
+                pl.col("latent_share").quantile(0.10).alias("p10"),
+                pl.col("latent_share").quantile(0.90).alias("p90"),
+            )
+            .sort("mean", descending=True)
+            .head(12)
+        )
+        if summary.is_empty():
+            return None
+        labels = [f"{row['race_id']}\n{row['option_id']}" for row in summary.iter_rows(named=True)]
+        mean = summary["mean"].to_numpy()
+        lower = mean - summary["p10"].to_numpy()
+        upper = summary["p90"].to_numpy() - mean
+        fig, ax = plt.subplots(figsize=(8.5, 5.8), dpi=150)
+        y = np.arange(summary.height)
+        ax.errorbar(
+            mean,
+            y,
+            xerr=np.vstack([lower, upper]),
+            fmt="o",
+            color=PARTY_COLORS["DEM"],
+            ecolor=GOLD_COLOR,
+            elinewidth=2,
+            capsize=3,
+        )
+        ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=1)
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1)
+        ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.set_xlabel("Latent vote share")
+        ax.set_title("Bayesian Polling Posterior Intervals", loc="left", fontweight="bold")
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "posterior_latent_share_intervals.png")
+
+    def _posterior_diagnostic_bars(
+        self, plot_dir: Path, diagnostics: dict[str, Any]
+    ) -> Path | None:
+        if not diagnostics or str(diagnostics.get("engine", "kalman")) == "kalman":
+            return None
+        metrics = {
+            "draws": float(diagnostics.get("draw_count") or 0),
+            "race-options": float(diagnostics.get("race_option_count") or 0),
+            "polls": float(diagnostics.get("poll_count") or 0),
+            "divergences": float(diagnostics.get("divergences") or 0),
+        }
+        if not any(value > 0 for value in metrics.values()):
+            return None
+        fig, ax = plt.subplots(figsize=(7.5, 4.8), dpi=150)
+        labels = list(metrics)
+        values = np.array(list(metrics.values()))
+        colors = [PARTY_COLORS["DEM"], PARTY_COLORS["REP"], GOLD_COLOR, MUTED_COLOR]
+        ax.bar(labels, values, color=colors[: len(labels)])
+        for index, value in enumerate(values):
+            ax.text(index, value, f"{value:.0f}", ha="center", va="bottom", fontsize=9)
+        ax.set_ylabel("Count")
+        ax.set_title("Bayesian Posterior Diagnostics", loc="left", fontweight="bold")
+        subtitle = (
+            f"engine={diagnostics.get('engine')} | "
+            f"parameterization={diagnostics.get('parameterization', 'n/a')}"
+        )
+        ax.text(0.01, 0.94, subtitle, transform=ax.transAxes, color=MUTED_COLOR, fontsize=9)
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "posterior_diagnostics.png")
+
+    def _fundamentals_prior_intervals(
+        self, plot_dir: Path, fundamentals_prior: pl.DataFrame
+    ) -> Path | None:
+        required = {"race_id", "option_id", "mean_share", "mean_logit", "sd_logit"}
+        if fundamentals_prior.is_empty() or not required.issubset(fundamentals_prior.columns):
+            return None
+        frame = (
+            fundamentals_prior.with_columns(
+                (1.0 / (1.0 + (-pl.col("mean_logit") + pl.col("sd_logit")).exp())).alias("p10"),
+                (1.0 / (1.0 + (-pl.col("mean_logit") - pl.col("sd_logit")).exp())).alias("p90"),
+            )
+            .sort("mean_share", descending=True)
+            .head(12)
+        )
+        if frame.is_empty():
+            return None
+        labels = [f"{row['race_id']}\n{row['option_id']}" for row in frame.iter_rows(named=True)]
+        mean = frame["mean_share"].to_numpy()
+        lower = mean - frame["p10"].to_numpy()
+        upper = frame["p90"].to_numpy() - mean
+        fig, ax = plt.subplots(figsize=(8.5, 5.8), dpi=150)
+        y = np.arange(frame.height)
+        ax.errorbar(
+            mean,
+            y,
+            xerr=np.vstack([lower, upper]),
+            fmt="o",
+            color=GOLD_COLOR,
+            ecolor=PARTY_COLORS["DEM"],
+            elinewidth=2,
+            capsize=3,
+        )
+        ax.axvline(0.5, color=MUTED_COLOR, linestyle="--", linewidth=1)
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1)
+        ax.xaxis.set_major_formatter(PercentFormatter(1.0))
+        ax.set_xlabel("Election-day prior vote share")
+        ax.set_title("Fundamentals Prior Intervals", loc="left", fontweight="bold")
+        self._style_axis(ax)
+        return self._save(fig, plot_dir / "fundamentals_prior_intervals.png")
 
     def _simulation_probability_convergence(
         self, plot_dir: Path, forecast_draws: pl.DataFrame

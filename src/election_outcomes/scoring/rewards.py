@@ -24,6 +24,7 @@ class RewardEvaluator:
         backtest_payload: dict[str, Any],
         plot_manifest: dict[str, list[dict[str, str]]] | None = None,
         performance: dict[str, Any] | None = None,
+        posterior_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         provenance_share = self._provenance_share(race_forecasts, source_manifest)
         tier_c_ok = self._tier_c_withheld(race_forecasts, race_catalog)
@@ -32,6 +33,7 @@ class RewardEvaluator:
         reproducibility = self._reproducibility_status(artifact_dir)
         trustworthy_backtest = self._trustworthy_backtest(backtest_payload)
         sync_breakdown = self._sync_breakdown(source_manifest)
+        component_admission = self._component_admission_metric(ablations)
         return {
             "run_id": run_id,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -83,13 +85,8 @@ class RewardEvaluator:
                     ),
                 },
                 "R6_component_admission": {
-                    "passed": trustworthy_backtest
-                    and all(
-                        item.get("beats_or_matches_baseline", False)
-                        for key, item in ablations.items()
-                        if key in {"polling", "fundamentals", "markets", "ensemble"}
-                    ),
-                    "metric": ablations,
+                    "passed": trustworthy_backtest and component_admission["passed"],
+                    "metric": component_admission,
                     "detail": "Trusted components are backed by ablation evidence.",
                 },
                 "R7_sparse_honesty": {
@@ -132,6 +129,34 @@ class RewardEvaluator:
                     "metric": performance or {},
                     "detail": (
                         "Forecast runs record acceleration engine, parallel mode, and draw count."
+                    ),
+                },
+                "R13_posterior_quality": {
+                    "passed": self._posterior_quality_ok(posterior_diagnostics),
+                    "metric": posterior_diagnostics or {},
+                    "detail": (
+                        "Bayesian runs must emit posterior diagnostics with enough draws, no "
+                        "divergences, and valid R-hat/ESS when those MCMC metrics are available."
+                    ),
+                },
+                "R14_calibrated_publication": {
+                    "passed": self._calibrated_publication_ok(
+                        race_forecasts, artifact_dir, ensemble_metrics
+                    ),
+                    "metric": self._calibrated_publication_metric(
+                        race_forecasts, artifact_dir, ensemble_metrics
+                    ),
+                    "detail": (
+                        "Published probabilities must either use a persisted recalibration map "
+                        "or show acceptable rolling-origin calibration without a map."
+                    ),
+                },
+                "R15_daily_update_quality": {
+                    "passed": self._daily_update_quality_ok(artifact_dir),
+                    "metric": self._latest_daily_update(artifact_dir),
+                    "detail": (
+                        "Daily update, when present, must pass its strategy-specific quality "
+                        "gate and avoid full-refit triggers."
                     ),
                 },
             },
@@ -203,6 +228,38 @@ class RewardEvaluator:
         }
         return required.issubset(set(race_forecasts.columns)) and race_forecasts.height > 0
 
+    def _component_admission_metric(self, ablations: dict[str, Any]) -> dict[str, Any]:
+        trusted_components = {
+            str(key): bool(value)
+            for key, value in dict(self.model_config.get("trusted_components", {})).items()
+        }
+        component_keys = {"polling", "fundamentals", "markets", "public_signals"}
+        trusted_results = {
+            component: ablations.get(component, {})
+            for component, trusted in trusted_components.items()
+            if trusted and component in component_keys
+        }
+        failed_trusted = sorted(
+            component
+            for component, result in trusted_results.items()
+            if not bool(result.get("beats_or_matches_baseline", False))
+        )
+        ensemble_result = dict(ablations.get("ensemble", {}))
+        ensemble_passed = bool(ensemble_result.get("beats_or_matches_baseline", False))
+        return {
+            "passed": ensemble_passed and not failed_trusted,
+            "trusted_components": trusted_components,
+            "trusted_component_results": trusted_results,
+            "failed_trusted_components": failed_trusted,
+            "untrusted_components": sorted(
+                component
+                for component in component_keys
+                if component in trusted_components and not trusted_components[component]
+            ),
+            "ensemble": ensemble_result,
+            "all_ablations": ablations,
+        }
+
     @staticmethod
     def _plot_contract_ok(
         artifact_dir: Path, plot_manifest: dict[str, list[dict[str, str]]]
@@ -224,6 +281,142 @@ class RewardEvaluator:
                 return performance["engine"] == "numba"
             return performance["engine"] == "python"
         return performance["engine"] in {"numba", "python"}
+
+    @staticmethod
+    def _posterior_quality_ok(diagnostics: dict[str, Any] | None) -> bool | None:
+        if not diagnostics:
+            return None
+        if str(diagnostics.get("fallback_used") or "").strip():
+            return False
+        if int(diagnostics.get("divergences") or 0) != 0:
+            return False
+        if int(diagnostics.get("draw_count") or 0) < 100:
+            return False
+        if int(diagnostics.get("race_option_count") or 0) <= 0:
+            return False
+        r_hat = diagnostics.get("r_hat_max")
+        ess = diagnostics.get("ess_min")
+        if r_hat is not None and float(r_hat) > 1.05:
+            return False
+        if ess is not None and float(ess) < 400:
+            return False
+        return True
+
+    def _calibrated_publication_ok(
+        self,
+        race_forecasts: pl.DataFrame,
+        artifact_dir: Path,
+        ensemble_metrics: dict[str, Any],
+    ) -> bool | None:
+        if race_forecasts.is_empty() or "winner_probability" not in race_forecasts.columns:
+            return None
+        published = race_forecasts.filter(pl.col("winner_probability").is_not_null())
+        if published.is_empty():
+            return None
+        map_present = (artifact_dir / "recalibration_map.parquet").exists()
+        statuses = self._forecast_calibration_statuses(race_forecasts)
+        if map_present:
+            return bool(statuses) and "not_configured" not in statuses
+        if not ensemble_metrics:
+            return None
+        return self._already_calibrated(ensemble_metrics)
+
+    def _calibrated_publication_metric(
+        self,
+        race_forecasts: pl.DataFrame,
+        artifact_dir: Path,
+        ensemble_metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        statuses = self._forecast_calibration_statuses(race_forecasts)
+        non_null = (
+            race_forecasts.filter(pl.col("winner_probability").is_not_null())
+            if "winner_probability" in race_forecasts.columns
+            else pl.DataFrame()
+        )
+        max_delta = None
+        if (
+            not non_null.is_empty()
+            and "raw_winner_probability" in non_null.columns
+            and "winner_probability" in non_null.columns
+        ):
+            max_delta = float(
+                non_null.select(
+                    (pl.col("winner_probability") - pl.col("raw_winner_probability")).abs().max()
+                ).item()
+                or 0.0
+            )
+        map_path = artifact_dir / "recalibration_map.parquet"
+        map_rows = None
+        map_status = None
+        if map_path.exists():
+            frame = pl.read_parquet(map_path)
+            map_rows = frame.height
+            if not frame.is_empty() and "status" in frame.columns:
+                map_status = str(frame["status"][0])
+        return {
+            "map_present": map_path.exists(),
+            "map_rows": map_rows,
+            "map_status": map_status,
+            "forecast_calibration_statuses": statuses,
+            "max_probability_delta": max_delta,
+            "rolling_origin_calibration": {
+                "intercept": ensemble_metrics.get("calibration_intercept"),
+                "slope": ensemble_metrics.get("calibration_slope"),
+                "expected_calibration_error": ensemble_metrics.get("expected_calibration_error"),
+            },
+            "already_calibrated_without_map": self._already_calibrated(ensemble_metrics)
+            if ensemble_metrics
+            else None,
+        }
+
+    @staticmethod
+    def _forecast_calibration_statuses(race_forecasts: pl.DataFrame) -> list[str]:
+        if (
+            race_forecasts.is_empty()
+            or "probability_calibration_status" not in race_forecasts.columns
+        ):
+            return []
+        return sorted(
+            str(value)
+            for value in race_forecasts["probability_calibration_status"]
+            .drop_nulls()
+            .unique()
+            .to_list()
+        )
+
+    def _already_calibrated(self, metrics: dict[str, Any]) -> bool:
+        if not metrics:
+            return False
+        intercept = metrics.get("calibration_intercept")
+        slope = metrics.get("calibration_slope")
+        ece = metrics.get("expected_calibration_error")
+        if intercept is None or slope is None or ece is None:
+            return False
+        thresholds = dict(self.model_config.get("reward_thresholds", {}))
+        max_abs_intercept = float(thresholds.get("calibration_max_abs_intercept", 0.05))
+        max_slope_delta = float(thresholds.get("calibration_max_slope_delta", 0.10))
+        max_ece = float(thresholds.get("calibration_max_ece", 0.06))
+        return (
+            abs(float(intercept)) <= max_abs_intercept
+            and abs(float(slope) - 1.0) <= max_slope_delta
+            and float(ece) <= max_ece
+        )
+
+    @staticmethod
+    def _daily_update_quality_ok(artifact_dir: Path) -> bool | None:
+        latest = RewardEvaluator._latest_daily_update(artifact_dir)
+        if not latest:
+            return None
+        return bool(latest.get("quality_passed")) and not bool(latest.get("needs_full_refit"))
+
+    @staticmethod
+    def _latest_daily_update(artifact_dir: Path) -> dict[str, Any]:
+        path = artifact_dir / "latest_daily_update.json"
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _reproducibility_status(artifact_dir: Path) -> dict[str, Any]:

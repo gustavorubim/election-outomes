@@ -1,0 +1,28 @@
+{
+  "type": "table",
+  "required_columns": [
+    "race_id",
+    "cycle",
+    "state",
+    "district",
+    "redistricting_era",
+    "option_id",
+    "party",
+    "draw_count",
+    "posterior_share_mean",
+    "posterior_share_p10",
+    "posterior_share_p90",
+    "posterior_logit_mean",
+    "national_house_environment_logit_mean",
+    "era_effect_logit",
+    "state_effect_logit",
+    "district_idiosyncratic_logit",
+    "district_poll_count",
+    "unpolled_district",
+    "covariance_method",
+    "methodology",
+    "fallback_used",
+    "model_config_hash",
+    "source_manifest_hash"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "type": "table",
+  "required_columns": [
+    "draw_id",
+    "chain_id",
+    "race_id",
+    "option_id",
+    "geography",
+    "trajectory_date",
+    "latent_logit",
+    "latent_share",
+    "systematic_error",
+    "pollster_effect",
+    "diagnostic_only",
+    "model_config_hash",
+    "source_manifest_hash"
+  ],
+  "column_types": {
+    "draw_id": "integer",
+    "chain_id": "integer",
+    "race_id": "string",
+    "option_id": "string",
+    "geography": "string",
+    "trajectory_date": "date",
+    "latent_logit": "number",
+    "latent_share": "number",
+    "systematic_error": "number",
+    "pollster_effect": "number",
+    "diagnostic_only": "boolean",
+    "model_config_hash": "string",
+    "source_manifest_hash": "string"
+  }
+}

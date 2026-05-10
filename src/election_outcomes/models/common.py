@@ -10,6 +10,15 @@ def logistic(value: float) -> float:
     return 1.0 / (1.0 + math.exp(-value))
 
 
+def logit(value: float, low: float = 1e-6, high: float = 1.0 - 1e-6) -> float:
+    clipped = clamp(value, low, high)
+    return math.log(clipped / (1.0 - clipped))
+
+
+def inv_logit(value: float) -> float:
+    return logistic(value)
+
+
 def normal_cdf(value: float) -> float:
     return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
 

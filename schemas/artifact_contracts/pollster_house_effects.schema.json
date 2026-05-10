@@ -1,0 +1,14 @@
+{
+  "description": "Empirical-Bayes pollster house-effect estimates used to initialize Bayesian polling.",
+  "required_columns": [
+    "pollster",
+    "option_id",
+    "effect",
+    "raw_effect",
+    "prior_effect",
+    "shrinkage",
+    "poll_count",
+    "model_config_hash",
+    "source_manifest_hash"
+  ]
+}

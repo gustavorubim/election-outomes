@@ -111,6 +111,13 @@ class ResultComparator:
         comparison = forecasts.join(actuals, on=["race_id", "option_id"], how="inner")
         if comparison.is_empty():
             return comparison
+        for column in ("vote_share_mean", "winner_probability"):
+            if column not in comparison.columns:
+                comparison = comparison.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
+        comparison = comparison.with_columns(
+            pl.col("vote_share_mean").cast(pl.Float64),
+            pl.col("winner_probability").cast(pl.Float64),
+        )
         comparison = comparison.with_columns(
             (pl.col("vote_share_mean") - pl.col("actual_vote_share")).alias("vote_share_error"),
             (pl.col("vote_share_mean") - pl.col("actual_vote_share"))
@@ -272,25 +279,38 @@ class ResultComparator:
             ]
             if column in comparison.columns
         ]
-        sorted_forecast = comparison.with_columns(
-            pl.col("winner_probability").fill_null(-1.0).alias("_winner_probability_sort")
-        ).sort(
-            ["race_id", "_winner_probability_sort", "option_id"],
-            descending=[False, True, False],
-        )
-        predicted = (
-            sorted_forecast.group_by("race_id", maintain_order=True)
+        base = (
+            comparison.sort(["race_id", "option_id"])
+            .group_by("race_id", maintain_order=True)
             .head(1)
-            .select(
-                [
-                    *base_columns,
-                    pl.col("option_id").alias("predicted_winner_option_id"),
-                    name_expr.alias("predicted_winner_name"),
-                    party_expr.alias("predicted_winner_party"),
-                    pl.col("winner_probability").alias("predicted_winner_probability"),
-                ]
-            )
+            .select(base_columns)
         )
+        forecast_candidates = comparison.filter(pl.col("winner_probability").is_not_null())
+        if forecast_candidates.is_empty():
+            predicted = base.select("race_id").with_columns(
+                pl.lit(None, dtype=pl.Utf8).alias("predicted_winner_option_id"),
+                pl.lit(None, dtype=pl.Utf8).alias("predicted_winner_name"),
+                pl.lit(None, dtype=pl.Utf8).alias("predicted_winner_party"),
+                pl.lit(None, dtype=pl.Float64).alias("predicted_winner_probability"),
+            )
+        else:
+            sorted_forecast = forecast_candidates.sort(
+                ["race_id", "winner_probability", "option_id"],
+                descending=[False, True, False],
+            )
+            predicted = (
+                sorted_forecast.group_by("race_id", maintain_order=True)
+                .head(1)
+                .select(
+                    [
+                        "race_id",
+                        pl.col("option_id").alias("predicted_winner_option_id"),
+                        name_expr.alias("predicted_winner_name"),
+                        party_expr.alias("predicted_winner_party"),
+                        pl.col("winner_probability").alias("predicted_winner_probability"),
+                    ]
+                )
+            )
         actual = (
             comparison.filter(pl.col("actual_winner"))
             .sort(["race_id", "option_id"])
@@ -306,9 +326,17 @@ class ResultComparator:
                 ]
             )
         )
-        outcome = predicted.join(actual, on="race_id", how="left").with_columns(
-            (pl.col("predicted_winner_option_id") == pl.col("actual_winner_option_id")).alias(
-                "race_winner_correct"
+        outcome = (
+            base.join(predicted, on="race_id", how="left")
+            .join(actual, on="race_id", how="left")
+            .with_columns(
+                pl.when(
+                    pl.col("predicted_winner_option_id").is_not_null()
+                    & pl.col("actual_winner_option_id").is_not_null()
+                )
+                .then(pl.col("predicted_winner_option_id") == pl.col("actual_winner_option_id"))
+                .otherwise(None)
+                .alias("race_winner_correct")
             )
         )
         for column, dtype in schema.items():

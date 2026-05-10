@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "required": [
+    "engine",
+    "draw_count",
+    "race_option_count",
+    "poll_count",
+    "divergences",
+    "fallback_used",
+    "model_config_hash",
+    "source_manifest_hash"
+  ],
+  "properties": {
+    "engine": {"type": "string"},
+    "parameterization": {"type": "string"},
+    "draw_count": {"type": "integer"},
+    "race_option_count": {"type": "integer"},
+    "poll_count": {"type": "integer"},
+    "posterior_logit_sd_mean": {"type": ["number", "null"]},
+    "r_hat_max": {"type": ["number", "null"]},
+    "ess_min": {"type": ["number", "null"]},
+    "divergences": {"type": "integer"},
+    "fallback_used": {"type": ["string", "null"]},
+    "model_config_hash": {"type": "string"},
+    "source_manifest_hash": {"type": "string"}
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "type": "table",
+  "required_columns": [
+    "as_of",
+    "updated_at",
+    "race_id",
+    "option_id",
+    "latent_share_mean",
+    "latent_share_p10",
+    "latent_share_p90",
+    "latent_logit_mean",
+    "draw_count",
+    "strategy",
+    "effective_sample_size_ratio",
+    "posterior_drift",
+    "needs_full_refit"
+  ],
+  "column_types": {
+    "as_of": "string",
+    "updated_at": "string",
+    "race_id": "string",
+    "option_id": "string",
+    "latent_share_mean": "number",
+    "latent_share_p10": "number",
+    "latent_share_p90": "number",
+    "latent_logit_mean": "number",
+    "draw_count": "integer",
+    "strategy": "string",
+    "effective_sample_size_ratio": "number",
+    "posterior_drift": "number",
+    "needs_full_refit": "boolean"
+  }
+}

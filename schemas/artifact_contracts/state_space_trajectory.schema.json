@@ -1,0 +1,27 @@
+{
+  "description": "Bayesian state-space trajectory summaries by race, option, and date.",
+  "required_columns": [
+    "race_id",
+    "option_id",
+    "component",
+    "trajectory_date",
+    "as_of",
+    "latent_vote_share",
+    "latent_variance",
+    "latent_sigma",
+    "initial_vote_share_prior",
+    "marginal_win_probability",
+    "poll_count",
+    "effective_sample_size",
+    "mean_observed_share",
+    "mean_adjusted_share",
+    "mean_observation_variance",
+    "mean_house_effect",
+    "process_variance",
+    "nonsampling_variance",
+    "admitted",
+    "explanation",
+    "model_config_hash",
+    "source_manifest_hash"
+  ]
+}

@@ -72,9 +72,15 @@ class SimulationEngine:
         self.use_numba = requested_engine == "numba" and self.parallel and NUMBA_AVAILABLE
         self.engine = "numba" if self.use_numba else "python"
         self.requested_engine = requested_engine
+        self._posterior_draws_used = False
 
-    def run(self, bundle: FeatureBundle, ensemble: pl.DataFrame) -> SimulationOutputs:
-        draws = self._draws(bundle, ensemble)
+    def run(
+        self,
+        bundle: FeatureBundle,
+        ensemble: pl.DataFrame,
+        posterior_draws: pl.DataFrame | None = None,
+    ) -> SimulationOutputs:
+        draws = self._draws(bundle, ensemble, posterior_draws=posterior_draws)
         forecasts = self._race_forecasts(bundle, draws, ensemble)
         control = self._control_forecasts(bundle, draws)
         ecosystem = self._ecosystem_forecasts(bundle, draws)
@@ -89,13 +95,19 @@ class SimulationEngine:
             "numba_threads": self.numba_threads,
             "simulation_count": self.draw_count,
             "systematic_error_mode": self._systematic_error_mode(),
+            "posterior_draws_used": self._posterior_draws_used,
             "probability_calibration_status": str(
                 self.probability_calibration.get("status", "not_configured")
             ),
             "close_margin_ecosystem_included": self.include_close_margin_ecosystem,
         }
 
-    def _draws(self, bundle: FeatureBundle, ensemble: pl.DataFrame) -> pl.DataFrame:
+    def _draws(
+        self,
+        bundle: FeatureBundle,
+        ensemble: pl.DataFrame,
+        posterior_draws: pl.DataFrame | None = None,
+    ) -> pl.DataFrame:
         if ensemble.is_empty():
             return pl.DataFrame()
         rng = np.random.default_rng(self.seed)
@@ -120,7 +132,15 @@ class SimulationEngine:
             else rng.normal(0, self.national_sigma, self.draw_count)
         )
         systematic_errors = self._systematic_errors(catalog, rng)
+        posterior_frame = self._posterior_draw_frame(bundle, ensemble, posterior_draws)
+        posterior_races = (
+            set(posterior_frame["race_id"].unique().to_list())
+            if not posterior_frame.is_empty()
+            else set()
+        )
         for race_id, options in options_by_race.items():
+            if race_id in posterior_races:
+                continue
             race = catalog[race_id]
             if race["tier"] == "C" or race_id not in estimates:
                 continue
@@ -155,6 +175,11 @@ class SimulationEngine:
             )
 
         frames: list[pl.DataFrame] = []
+        if not posterior_frame.is_empty():
+            frames.append(posterior_frame)
+            self._posterior_draws_used = True
+        else:
+            self._posterior_draws_used = False
         binary_frame = self._binary_draw_frame(binary_specs, national_error)
         if not binary_frame.is_empty():
             frames.append(binary_frame)
@@ -162,6 +187,86 @@ class SimulationEngine:
         if not multi_frame.is_empty():
             frames.append(multi_frame)
         return pl.concat(frames, how="vertical") if frames else pl.DataFrame()
+
+    def _posterior_draw_frame(
+        self,
+        bundle: FeatureBundle,
+        ensemble: pl.DataFrame,
+        posterior_draws: pl.DataFrame | None,
+    ) -> pl.DataFrame:
+        required = {"draw_id", "race_id", "option_id", "latent_share"}
+        if (
+            posterior_draws is None
+            or posterior_draws.is_empty()
+            or not required.issubset(posterior_draws.columns)
+        ):
+            return pl.DataFrame()
+        available_draw_ids = sorted(
+            int(value) for value in posterior_draws["draw_id"].unique().to_list()
+        )
+        if len(available_draw_ids) < self.draw_count:
+            return pl.DataFrame()
+        draw_id_map = pl.DataFrame(
+            {
+                "draw_id": available_draw_ids[: self.draw_count],
+                "simulation_draw_id": list(range(self.draw_count)),
+            }
+        )
+        trusted_races = set(bundle.race_catalog.filter(pl.col("tier") != "C")["race_id"].to_list())
+        ensemble_races = set(ensemble["race_id"].unique().to_list())
+        eligible_races = trusted_races & ensemble_races
+        if not eligible_races:
+            return pl.DataFrame()
+        options = bundle.options.select(["race_id", "option_id", "party"])
+        fundamentals = {row["race_id"]: row for row in bundle.fundamentals.iter_rows(named=True)}
+        turnout_rows = [
+            {
+                "race_id": race_id,
+                "turnout": round(self._turnout_base(str(race_id), fundamentals)),
+            }
+            for race_id in sorted(eligible_races)
+        ]
+        turnouts = pl.DataFrame(turnout_rows) if turnout_rows else pl.DataFrame()
+        if turnouts.is_empty():
+            return pl.DataFrame()
+        frame = (
+            posterior_draws.filter(pl.col("race_id").is_in(eligible_races))
+            .join(draw_id_map, on="draw_id", how="inner")
+            .group_by(["simulation_draw_id", "race_id", "option_id"], maintain_order=True)
+            .agg(pl.col("latent_share").mean().alias("latent_share"))
+            .join(options, on=["race_id", "option_id"], how="inner")
+            .join(turnouts, on="race_id", how="left")
+        )
+        if frame.is_empty():
+            return pl.DataFrame()
+        frame = frame.with_columns(
+            pl.max_horizontal(pl.col("latent_share"), pl.lit(1e-6)).alias("latent_share")
+        )
+        frame = frame.with_columns(
+            (
+                pl.col("latent_share")
+                / pl.col("latent_share").sum().over(["simulation_draw_id", "race_id"])
+            ).alias("vote_share")
+        )
+        return frame.with_columns(
+            pl.col("simulation_draw_id").alias("draw_id"),
+            pl.col("simulation_draw_id").alias("correlated_error_draw_id"),
+            (
+                pl.col("vote_share")
+                == pl.col("vote_share").max().over(["simulation_draw_id", "race_id"])
+            ).alias("winner"),
+        ).select(
+            [
+                "draw_id",
+                "correlated_error_draw_id",
+                "race_id",
+                "option_id",
+                "party",
+                "turnout",
+                "vote_share",
+                "winner",
+            ]
+        )
 
     def _race_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
         tier_floor = self.tier_sigma.get(str(race["tier"]), 0.08)
@@ -640,6 +745,8 @@ class SimulationEngine:
         return sorted(rows, key=lambda item: item["pivotal_rate"], reverse=True)
 
     def _ecosystem_forecasts(self, bundle: FeatureBundle, draws: pl.DataFrame) -> pl.DataFrame:
+        if draws.is_empty() or "race_id" not in draws.columns:
+            return self._empty_ecosystem_forecasts()
         catalog = {row["race_id"]: row for row in bundle.race_catalog.iter_rows(named=True)}
         rows: list[dict[str, object]] = []
         for race_id, group in draws.group_by("race_id", maintain_order=True):
@@ -686,8 +793,27 @@ class SimulationEngine:
                 }
             )
         if not rows:
-            return pl.DataFrame()
+            return self._empty_ecosystem_forecasts()
         return pl.DataFrame(rows).with_columns(
             pl.col("recount_probability").cast(pl.Float64),
             pl.col("certification_risk_probability").cast(pl.Float64),
+        )
+
+    @staticmethod
+    def _empty_ecosystem_forecasts() -> pl.DataFrame:
+        return pl.DataFrame(
+            schema={
+                "race_id": pl.Utf8,
+                "tier": pl.Utf8,
+                "turnout_mean": pl.Float64,
+                "turnout_p10": pl.Float64,
+                "turnout_p90": pl.Float64,
+                "demographic_composition": pl.Utf8,
+                "demographic_model_status": pl.Utf8,
+                "recount_probability": pl.Float64,
+                "certification_risk_probability": pl.Float64,
+                "certification_risk_model": pl.Utf8,
+                "close_margin_risk_status": pl.Utf8,
+                "ballot_measure_supported": pl.Boolean,
+            }
         )

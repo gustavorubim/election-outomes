@@ -1,0 +1,22 @@
+{
+  "description": "Persisted probability recalibration map used by published forecast probabilities.",
+  "required_columns": [
+    "method",
+    "status",
+    "input_probability",
+    "intercept",
+    "slope",
+    "sample_size",
+    "ridge",
+    "min_slope",
+    "max_slope",
+    "max_abs_intercept",
+    "uncalibrated_log_loss",
+    "calibrated_log_loss",
+    "fit_cycles",
+    "as_of_cuts",
+    "fit_at",
+    "source_manifest_hash",
+    "model_config_hash"
+  ]
+}

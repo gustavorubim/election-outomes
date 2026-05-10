@@ -24,9 +24,24 @@ class ModelCard:
         covariance_rows = 0 if residual_covariance is None else residual_covariance.height
         runtime_metadata = runtime_metadata or {}
         admission_source = dict(model_config.get("component_admission_source", {}))
+        house_effect_rows = self._house_effect_rows(pollster_house_effects or {})
         fundamentals_status = runtime_metadata.get("fundamentals", {}).get(
             "fit_status", "not captured for rebuilt report"
         )
+        fundamentals_prior = runtime_metadata.get("fundamentals_prior", {})
+        polling_metadata = runtime_metadata.get("polling", {})
+        polling_engine = polling_metadata.get("engine")
+        polling_status = (
+            "deterministic Gaussian state-space Kalman filter with empirical-Bayes "
+            f"pollster house-effect shrinkage; learned_effects={len(house_effect_rows)}"
+        )
+        if polling_engine and polling_engine != "kalman":
+            polling_status = (
+                f"{polling_engine}; draw_count={polling_metadata.get('draw_count')}; "
+                f"race_options={polling_metadata.get('race_option_count')}; "
+                f"fallback={polling_metadata.get('fallback_used')}; "
+                f"learned_effects={len(house_effect_rows)}"
+            )
         covariance_status = "fixed config fallback"
         if covariance_rows:
             sample_size = (
@@ -46,19 +61,18 @@ class ModelCard:
             )
             method = str(method_values[0]) if method_values else "learned from rolling residuals"
             covariance_status = f"{method}; sample_size={sample_size}; matrix_rank={matrix_rank}"
-        house_effect_rows = self._house_effect_rows(pollster_house_effects or {})
         fit_status = {
-            "polling": (
-                "deterministic Gaussian state-space Kalman filter with empirical-Bayes "
-                f"pollster house-effect shrinkage; learned_effects={len(house_effect_rows)}"
-            ),
+            "polling": polling_status,
             "fundamentals": fundamentals_status,
+            "fundamentals_prior": fundamentals_prior,
             "markets": (
                 "configured public-market inversion; ensemble calibration applied downstream"
             ),
             "public_signals": "experimental unless admission artifact proves value",
             "covariance": covariance_status,
             "probability_calibration": model_config.get("probability_calibration", {}),
+            "recalibration_map": runtime_metadata.get("recalibration_map", {}),
+            "office_methodology": runtime_metadata.get("office_methodology", {}),
         }
         return f"""# Model Card
 
@@ -128,12 +142,14 @@ class ModelCard:
 
 ## Source Coverage
 
+Status and retrieval timestamps are preserved in `source_manifest.parquet`; this summary
+keeps only stable source identity fields so same-input reruns can reproduce the model
+card fingerprint.
+
 ```json
 {
             json.dumps(
-                source_manifest.select(
-                    ["source_id", "table", "parser_version", "status"]
-                ).to_dicts()
+                source_manifest.select(["source_id", "table", "parser_version"]).to_dicts()
                 if not source_manifest.is_empty()
                 else [],
                 indent=2,

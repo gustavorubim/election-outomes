@@ -24,7 +24,7 @@ ensemble_learning:
   l2_prior_strength: 0.02
   calibration_ridge: 0.001
   calibration_min_slope: 0.25
-  calibration_max_slope: 4.0
+  calibration_max_slope: 2.0
   calibration_max_abs_intercept: 2.0
 baseline:
   previous_share_sigma: 0.08
@@ -35,6 +35,109 @@ polling:
   min_nonsampling_error: 0.035
   house_effect_iterations: 2
   pollster_house_effects: {}
+bayesian:
+  enabled: true
+  backend: nuts
+  posterior_draw_count: 1000
+  nuts:
+    num_warmup: 500
+    num_samples: 2000
+    num_chains: 2
+    chain_method: vectorized
+    target_accept_prob: 0.99
+    wall_clock_timeout_seconds: 2820
+    failover:
+      fallback_order:
+        - previous_posterior_reuse
+        - bayes_svi_fallback
+        - kalman_legacy_fallback
+      block_publication_on_fallback: true
+  state_space:
+    parameterization: noncentered
+    initial_state_logit_sd: 0.5
+    election_day_extra_sd: 0.025
+    poll_half_life_days: 7
+    geography_effect_sd: 0.06
+    race_effect_sd: 0.08
+  observation:
+    nonsampling_logit_floor: 0.02
+    pollster_effect_sd: 0.04
+  fundamentals_prior:
+    prior_strength: 0.5
+    structural_sd: 0.05
+    fallback_sd_logit: 0.30
+  senate:
+    enabled: true
+    class_effect_prior_sd: 0.01
+    seat_majority_threshold: 51
+  house:
+    enabled: true
+    covariance_method: block_diagonal_state_era_with_district_residuals
+    dense_covariance_enabled: false
+    seat_majority_threshold: 218
+  cross_office:
+    enabled: true
+    office_offset_prior_sd: 0.02
+daily_update:
+  strategy: reweighting
+  full_refit_days_since_anchor: 7
+  posterior_drift_threshold: 0.05
+  block_publication_on_quality_failure: true
+hyperprior_refresh:
+  schedule_days: 30
+  scenarios:
+    - president_state
+  inference_engine: bayes
+  promote_requires_explicit_review: true
+phase0b:
+  geometry_fixture:
+    latent_dimension: 56
+    pollster_effect_count: 28
+    sparse_state_count: 18
+    conflicting_late_poll_count: 8
+  acceptance:
+    min_ess_ratio: 0.50
+    collapse_ess_ratio: 0.25
+    max_posterior_mean_drift: 0.01
+    max_interval_width_drift: 0.012
+    max_calibration_drift: 0.015
+  dimensionality_ladder:
+    - scope: potus
+      office_count: 1
+      race_count: 56
+      latent_dimension: 56
+      largest_office_dimension: 56
+      daily_poll_count: 18
+    - scope: senate
+      office_count: 1
+      race_count: 33
+      latent_dimension: 33
+      largest_office_dimension: 33
+      daily_poll_count: 9
+    - scope: house_small
+      office_count: 1
+      race_count: 40
+      latent_dimension: 40
+      largest_office_dimension: 40
+      daily_poll_count: 12
+    - scope: combined
+      office_count: 3
+      race_count: 524
+      latent_dimension: 524
+      largest_office_dimension: 435
+      daily_poll_count: 54
+svi_warm_start:
+  enabled: false
+  max_steps: 2500
+  min_elbo_improvement: 0.001
+smc:
+  enabled: false
+  num_particles: 4000
+  ess_threshold: 0.5
+  refit_trigger:
+    ess_floor: 0.25
+    days_since_anchor: 7
+    divergence_count: 3
 uncertainty:
   tier_a_sigma: 0.035
   tier_b_sigma: 0.075
@@ -105,6 +208,7 @@ control_thresholds:
   president: 270
   senate: 51
   house: 218
+  governor: 1
   local: 1
 market_adjustments:
   min_open_interest: 1000
@@ -119,5 +223,8 @@ experimental_outputs:
 reward_thresholds:
   provenance_min_share: 1.0
   interval_coverage_tolerance: 0.12
+  calibration_max_abs_intercept: 0.05
+  calibration_max_slope_delta: 0.10
+  calibration_max_ece: 0.06
   reproducibility_required: true
   minimum_backtest_rows: 30

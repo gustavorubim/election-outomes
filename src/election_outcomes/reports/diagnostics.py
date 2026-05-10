@@ -20,6 +20,8 @@ class DiagnosticsReport:
         methodology_benchmark: dict[str, Any] | None = None,
         control_forecasts: pl.DataFrame | None = None,
         ecosystem_forecasts: pl.DataFrame | None = None,
+        posterior_diagnostics: dict[str, Any] | None = None,
+        fundamentals_prior: pl.DataFrame | None = None,
     ) -> str:
         rewards = (reward_card or {}).get("rewards", {})
         methodology_benchmark = methodology_benchmark or {}
@@ -68,6 +70,46 @@ class DiagnosticsReport:
         model_quality_plots = self._plot_sections(
             plot_manifest or {},
             categories=["model_quality", "calibration", "trajectory", "stability", "benchmark"],
+        )
+        posterior_plots = self._plot_sections(plot_manifest or {}, categories=["posterior"])
+        fundamentals_prior_plots = self._plot_sections(
+            plot_manifest or {}, categories=["fundamentals_prior"]
+        )
+        fundamentals_prior_table = self._fundamentals_prior_summary(
+            fundamentals_prior if fundamentals_prior is not None else pl.DataFrame()
+        )
+        posterior_section = (
+            f"""
+  <section id="posterior_diagnostics" class="panel plot-panel">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Bayesian fit</p>
+        <h2>Posterior Diagnostics</h2>
+      </div>
+    </div>
+    {self._posterior_diagnostics_summary(posterior_diagnostics or {})}
+    {posterior_plots}
+  </section>
+"""
+            if posterior_diagnostics
+            and str(posterior_diagnostics.get("engine", "kalman")) != "kalman"
+            else ""
+        )
+        fundamentals_prior_section = (
+            f"""
+  <section id="fundamentals_prior" class="panel plot-panel">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Bayesian prior</p>
+        <h2>Fundamentals Prior</h2>
+      </div>
+    </div>
+    {fundamentals_prior_table}
+    {fundamentals_prior_plots}
+  </section>
+"""
+            if fundamentals_prior is not None and not fundamentals_prior.is_empty()
+            else ""
         )
         return f"""<!doctype html>
 <html lang="en">
@@ -133,6 +175,10 @@ class DiagnosticsReport:
       {self._closest_race_list(race_forecasts)}
     </aside>
   </section>
+
+  {posterior_section}
+
+  {fundamentals_prior_section}
 
   <section class="panel plot-panel">
     <div class="section-head">
@@ -242,7 +288,7 @@ class DiagnosticsReport:
     {model_quality_plots}
   </section>
 
-  <section class="panel compact">
+  <section id="source_audit" class="panel compact">
     <div class="section-head">
       <div>
         <p class="eyebrow">Audit trail</p>
@@ -635,6 +681,51 @@ class DiagnosticsReport:
                 f"<span>{html.escape(label)}</span></div>"
             )
         return f'<div class="reward-grid">{"".join(items)}</div>'
+
+    @staticmethod
+    def _posterior_diagnostics_summary(diagnostics: dict[str, Any]) -> str:
+        if not diagnostics:
+            return '<p class="muted">No posterior diagnostics were emitted.</p>'
+        fields = [
+            ("Engine", diagnostics.get("engine")),
+            ("Parameterization", diagnostics.get("parameterization", "n/a")),
+            ("Draws", diagnostics.get("draw_count")),
+            ("Race-options", diagnostics.get("race_option_count")),
+            ("Polls", diagnostics.get("poll_count")),
+            ("Divergences", diagnostics.get("divergences")),
+            ("R-hat max", diagnostics.get("r_hat_max")),
+            ("ESS min", diagnostics.get("ess_min")),
+            ("Fallback", diagnostics.get("fallback_used")),
+        ]
+        rows = [
+            "<tr>"
+            f"<td>{html.escape(label)}</td>"
+            f"<td>{html.escape('n/a' if value is None else str(value))}</td>"
+            "</tr>"
+            for label, value in fields
+        ]
+        return (
+            '<table class="compact-table"><thead><tr><th>Metric</th><th>Value</th>'
+            f"</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+        )
+
+    @staticmethod
+    def _fundamentals_prior_summary(fundamentals_prior: pl.DataFrame) -> str:
+        if fundamentals_prior.is_empty():
+            return '<p class="muted">No fundamentals prior artifact was emitted.</p>'
+        method_counts = (
+            fundamentals_prior.group_by("prior_method").agg(pl.len().alias("count")).to_dicts()
+            if "prior_method" in fundamentals_prior.columns
+            else []
+        )
+        payload = {
+            "rows": fundamentals_prior.height,
+            "methods": method_counts,
+            "mean_sd_logit": float(fundamentals_prior["sd_logit"].mean())
+            if "sd_logit" in fundamentals_prior.columns
+            else None,
+        }
+        return f"<pre>{html.escape(json.dumps(payload, indent=2, sort_keys=True))}</pre>"
 
     @staticmethod
     def _backtest_summary(payload: dict[str, Any]) -> str:

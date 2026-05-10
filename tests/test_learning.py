@@ -99,6 +99,7 @@ def test_stacked_probability_uses_fallback_and_missing_values() -> None:
 def test_platt_calibration_bounds_and_identity_paths() -> None:
     probability = np.array([0.1, 0.2, 0.8, 0.9] * 10)
     actual = np.array([0.0, 0.0, 1.0, 1.0] * 10)
+    default_fitted = fit_platt_calibration(probability, actual, min_rows=10)
     fitted = fit_platt_calibration(
         probability,
         actual,
@@ -113,6 +114,8 @@ def test_platt_calibration_bounds_and_identity_paths() -> None:
         {"intercept": fitted["intercept"], "slope": fitted["slope"]},
     )
 
+    assert default_fitted["max_slope"] == 2.0
+    assert default_fitted["slope"] <= 2.0
     assert fitted["status"] == "fitted"
     assert 0.25 <= fitted["slope"] <= 2.0
     assert abs(fitted["intercept"]) <= 0.5

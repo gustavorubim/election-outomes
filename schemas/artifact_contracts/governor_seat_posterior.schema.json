@@ -1,0 +1,15 @@
+{
+  "type": "table",
+  "required_columns": [
+    "draw_id",
+    "control_body",
+    "party",
+    "seat_count_modeled",
+    "holdover_seats",
+    "seat_count_total",
+    "majority_threshold",
+    "majority",
+    "model_config_hash",
+    "source_manifest_hash"
+  ]
+}

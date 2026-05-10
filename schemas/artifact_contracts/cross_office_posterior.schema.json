@@ -1,0 +1,19 @@
+{
+  "type": "table",
+  "required_columns": [
+    "draw_id",
+    "cycle",
+    "office_type",
+    "race_count",
+    "option_count",
+    "office_mean_logit",
+    "national_midterm_environment_logit",
+    "office_offset_logit",
+    "office_share_mean",
+    "shared_draw_stream",
+    "methodology",
+    "fallback_used",
+    "model_config_hash",
+    "source_manifest_hash"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "type": "table",
+  "required_columns": [
+    "race_id",
+    "cycle",
+    "state",
+    "senate_class",
+    "option_id",
+    "party",
+    "draw_count",
+    "posterior_share_mean",
+    "posterior_share_p10",
+    "posterior_share_p90",
+    "posterior_logit_mean",
+    "national_environment_logit_mean",
+    "class_effect_logit",
+    "state_deviation_logit",
+    "modeled_seat_count_mean",
+    "total_seat_count_mean",
+    "majority_probability",
+    "majority_threshold",
+    "methodology",
+    "fallback_used",
+    "model_config_hash",
+    "source_manifest_hash"
+  ]
+}
