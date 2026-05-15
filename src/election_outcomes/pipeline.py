@@ -52,7 +52,7 @@ from election_outcomes.scoring import (
 from election_outcomes.storage.io import read_json, write_json, write_parquet, write_text
 
 _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
-    {"generated_at", "retrieved_at", "status", "elapsed_seconds"}
+    {"generated_at", "retrieved_at", "status", "elapsed_seconds", "fit_at"}
 )
 
 
@@ -107,6 +107,11 @@ class ForecastPipeline:
             model_config["_bayesian_backend"] = bayesian_backend.lower().strip()
         residual_covariance = self._load_residual_covariance(scenario_obj)
         recalibration_map = self._load_recalibration_map(scenario_obj)
+        if (
+            recalibration_map is None or recalibration_map.is_empty()
+        ) and not backtest_artifacts.recalibration_map.is_empty():
+            recalibration_map = backtest_artifacts.recalibration_map
+        recalibration_map = self._publication_recalibration_map(model_config, recalibration_map)
         source_manifest = pl.read_parquet(self.context.curated_dir / "source_manifest.parquet")
         fundamentals_model = FundamentalsModel(model_config).fit(training_bundle)
         fundamentals_prior = None
@@ -148,6 +153,7 @@ class ForecastPipeline:
                 )
             ).run(bundle),
         ]
+        model_config = self._ensure_available_component_admission(model_config, component_estimates)
         ensemble = EnsembleModel(model_config).run(bundle, component_estimates)
         outputs = SimulationEngine(
             model_config,
@@ -1700,7 +1706,11 @@ class ForecastPipeline:
         if isinstance(admission.get("component_weights"), dict):
             model_config["component_weights"] = admission["component_weights"]
         if isinstance(admission.get("probability_calibration"), dict):
-            model_config["probability_calibration"] = admission["probability_calibration"]
+            model_config["probability_calibration"] = (
+                ForecastPipeline._publication_probability_calibration(
+                    model_config, admission["probability_calibration"]
+                )
+            )
         if isinstance(admission.get("ensemble_learning"), dict):
             model_config["ensemble_learning_result"] = admission["ensemble_learning"]
         hyperpriors = admission.get("bayesian_hyperpriors")
@@ -1720,6 +1730,110 @@ class ForecastPipeline:
         model_config["component_admission"] = admission
         model_config["component_admission_source"] = source
         return model_config
+
+    @staticmethod
+    def _ensure_available_component_admission(
+        model_config: dict[str, Any],
+        component_estimates: list[pl.DataFrame],
+    ) -> dict[str, Any]:
+        available: set[str] = set()
+        for frame in component_estimates:
+            if frame.is_empty() or "component" not in frame.columns:
+                continue
+            admitted = frame.filter(pl.col("admitted")) if "admitted" in frame.columns else frame
+            available.update(str(value) for value in admitted["component"].unique().to_list())
+        trusted = {
+            str(key): bool(value)
+            for key, value in dict(model_config.get("trusted_components", {})).items()
+        }
+        weights = {
+            str(key): float(value)
+            for key, value in dict(model_config.get("component_weights", {})).items()
+        }
+        active_weight = sum(
+            weights.get(component, 0.0) for component in available if trusted.get(component, False)
+        )
+        if active_weight > 0:
+            return model_config
+        fallback = next(
+            (
+                component
+                for component in ["polling", "fundamentals", "markets", "public_signals"]
+                if component in available
+            ),
+            None,
+        )
+        if fallback is None:
+            return model_config
+        updated = json.loads(json.dumps(model_config))
+        all_components = (
+            set(weights)
+            | set(trusted)
+            | {
+                "polling",
+                "fundamentals",
+                "markets",
+                "public_signals",
+            }
+        )
+        updated["trusted_components"] = {
+            component: component == fallback for component in sorted(all_components)
+        }
+        updated["component_weights"] = {
+            component: (1.0 if component == fallback else 0.0)
+            for component in sorted(all_components)
+        }
+        updated["component_admission_runtime_fallback"] = {
+            "status": "activated",
+            "reason": "learned_trusted_components_unavailable_for_current_forecast",
+            "available_components": sorted(available),
+            "fallback_component": fallback,
+            "previous_trusted_components": trusted,
+            "previous_component_weights": weights,
+        }
+        return updated
+
+    @staticmethod
+    def _publication_probability_calibration(
+        model_config: dict[str, Any],
+        probability_calibration: dict[str, Any],
+    ) -> dict[str, Any]:
+        calibration = json.loads(json.dumps(probability_calibration))
+        settings = dict(model_config.get("ensemble_learning", {}))
+        configured_max = float(settings.get("calibration_max_slope", 1.0))
+        publication_max = min(configured_max, 1.0)
+        slope = float(calibration.get("slope", 1.0))
+        calibration["source_slope"] = slope
+        calibration["publication_max_slope"] = publication_max
+        calibration["publication_slope_capped"] = bool(
+            calibration.get("status") == "fitted" and slope > publication_max
+        )
+        if calibration["publication_slope_capped"]:
+            calibration["slope"] = publication_max
+            calibration["max_slope"] = publication_max
+            calibration["note"] = (
+                "Publication calibration does not sharpen probabilities above identity slope."
+            )
+        return calibration
+
+    @staticmethod
+    def _publication_recalibration_map(
+        model_config: dict[str, Any],
+        recalibration_map: pl.DataFrame | None,
+    ) -> pl.DataFrame | None:
+        if recalibration_map is None or recalibration_map.is_empty():
+            return recalibration_map
+        if "slope" not in recalibration_map.columns:
+            return recalibration_map
+        settings = dict(model_config.get("ensemble_learning", {}))
+        publication_max = min(float(settings.get("calibration_max_slope", 1.0)), 1.0)
+        expr = pl.min_horizontal(pl.col("slope"), pl.lit(publication_max))
+        if "status" in recalibration_map.columns:
+            expr = pl.when(pl.col("status") == "fitted").then(expr).otherwise(pl.col("slope"))
+        frame = recalibration_map.with_columns(expr.alias("slope"))
+        if "max_slope" in frame.columns:
+            frame = frame.with_columns(pl.lit(publication_max).alias("max_slope"))
+        return frame
 
     def _load_residual_covariance(self, scenario: Scenario | None) -> pl.DataFrame | None:
         return self._read_latest_covariance(scenario.family if scenario else None)

@@ -73,6 +73,7 @@ class SimulationEngine:
         self.engine = "numba" if self.use_numba else "python"
         self.requested_engine = requested_engine
         self._posterior_draws_used = False
+        self._posterior_draw_uncertainty_mode = "not_used"
 
     def run(
         self,
@@ -96,6 +97,7 @@ class SimulationEngine:
             "simulation_count": self.draw_count,
             "systematic_error_mode": self._systematic_error_mode(),
             "posterior_draws_used": self._posterior_draws_used,
+            "posterior_draw_uncertainty_mode": self._posterior_draw_uncertainty_mode,
             "probability_calibration_status": str(
                 self.probability_calibration.get("status", "not_configured")
             ),
@@ -132,7 +134,16 @@ class SimulationEngine:
             else rng.normal(0, self.national_sigma, self.draw_count)
         )
         systematic_errors = self._systematic_errors(catalog, rng)
-        posterior_frame = self._posterior_draw_frame(bundle, ensemble, posterior_draws)
+        posterior_frame = self._posterior_draw_frame(
+            bundle,
+            ensemble,
+            posterior_draws,
+            catalog=catalog,
+            fundamentals=fundamentals,
+            national_error=national_error,
+            systematic_errors=systematic_errors,
+            rng=rng,
+        )
         posterior_races = (
             set(posterior_frame["race_id"].unique().to_list())
             if not posterior_frame.is_empty()
@@ -178,8 +189,10 @@ class SimulationEngine:
         if not posterior_frame.is_empty():
             frames.append(posterior_frame)
             self._posterior_draws_used = True
+            self._posterior_draw_uncertainty_mode = "posterior_plus_simulation_error"
         else:
             self._posterior_draws_used = False
+            self._posterior_draw_uncertainty_mode = "not_used"
         binary_frame = self._binary_draw_frame(binary_specs, national_error)
         if not binary_frame.is_empty():
             frames.append(binary_frame)
@@ -193,6 +206,12 @@ class SimulationEngine:
         bundle: FeatureBundle,
         ensemble: pl.DataFrame,
         posterior_draws: pl.DataFrame | None,
+        *,
+        catalog: dict[str, dict[str, object]],
+        fundamentals: dict[str, dict[str, object]],
+        national_error: np.ndarray,
+        systematic_errors: dict[str, np.ndarray],
+        rng: np.random.Generator,
     ) -> pl.DataFrame:
         required = {"draw_id", "race_id", "option_id", "latent_share"}
         if (
@@ -218,24 +237,13 @@ class SimulationEngine:
         if not eligible_races:
             return pl.DataFrame()
         options = bundle.options.select(["race_id", "option_id", "party"])
-        fundamentals = {row["race_id"]: row for row in bundle.fundamentals.iter_rows(named=True)}
-        turnout_rows = [
-            {
-                "race_id": race_id,
-                "turnout": round(self._turnout_base(str(race_id), fundamentals)),
-            }
-            for race_id in sorted(eligible_races)
-        ]
-        turnouts = pl.DataFrame(turnout_rows) if turnout_rows else pl.DataFrame()
-        if turnouts.is_empty():
-            return pl.DataFrame()
         frame = (
             posterior_draws.filter(pl.col("race_id").is_in(eligible_races))
             .join(draw_id_map, on="draw_id", how="inner")
             .group_by(["simulation_draw_id", "race_id", "option_id"], maintain_order=True)
             .agg(pl.col("latent_share").mean().alias("latent_share"))
             .join(options, on=["race_id", "option_id"], how="inner")
-            .join(turnouts, on="race_id", how="left")
+            .sort(["race_id", "simulation_draw_id", "option_id"])
         )
         if frame.is_empty():
             return pl.DataFrame()
@@ -246,27 +254,77 @@ class SimulationEngine:
             (
                 pl.col("latent_share")
                 / pl.col("latent_share").sum().over(["simulation_draw_id", "race_id"])
-            ).alias("vote_share")
+            ).alias("latent_share")
         )
-        return frame.with_columns(
-            pl.col("simulation_draw_id").alias("draw_id"),
-            pl.col("simulation_draw_id").alias("correlated_error_draw_id"),
-            (
-                pl.col("vote_share")
-                == pl.col("vote_share").max().over(["simulation_draw_id", "race_id"])
-            ).alias("winner"),
-        ).select(
-            [
-                "draw_id",
-                "correlated_error_draw_id",
-                "race_id",
-                "option_id",
-                "party",
-                "turnout",
-                "vote_share",
-                "winner",
-            ]
-        )
+        rows: list[dict[str, object]] = []
+        zeros = np.zeros(self.draw_count)
+        for race_key, race_frame in frame.group_by("race_id", maintain_order=True):
+            race_id = str(race_key[0] if isinstance(race_key, tuple) else race_key)
+            if race_id not in catalog:
+                continue
+            estimate_rows = ensemble.filter(pl.col("race_id") == race_id).sort("option_id")
+            if estimate_rows.is_empty():
+                continue
+            race_options = list(
+                race_frame.select(["option_id", "party"])
+                .unique(maintain_order=True)
+                .sort("option_id")
+                .iter_rows(named=True)
+            )
+            if not race_options:
+                continue
+            shares_by_option = {
+                str(option["option_id"]): np.zeros(self.draw_count, dtype=np.float64)
+                for option in race_options
+            }
+            for row in race_frame.iter_rows(named=True):
+                draw_id = int(row["simulation_draw_id"])
+                option_id = str(row["option_id"])
+                if option_id in shares_by_option and 0 <= draw_id < self.draw_count:
+                    shares_by_option[option_id][draw_id] = float(row["latent_share"])
+            base_shares = np.column_stack(
+                [shares_by_option[str(option["option_id"])] for option in race_options]
+            )
+            row_sums = np.clip(base_shares.sum(axis=1), 1e-9, None)
+            base_shares = base_shares / row_sums[:, None]
+            first = estimate_rows.row(0, named=True)
+            sigma = self._race_sigma(catalog[race_id], first)
+            local_error = systematic_errors.get(race_id, zeros) + (
+                rng.standard_t(df=self.heavy_tail_df, size=self.draw_count)
+                * sigma
+                / self.heavy_tail_scale
+            )
+            total_error = national_error + local_error
+            adjusted_shares = np.empty_like(base_shares)
+            if len(race_options) == 1:
+                adjusted_shares[:, 0] = 1.0
+            elif len(race_options) == 2:
+                first_share = np.clip(base_shares[:, 0] + total_error, 0.02, 0.98)
+                adjusted_shares[:, 0] = first_share
+                adjusted_shares[:, 1] = 1.0 - first_share
+            else:
+                for draw_id in range(self.draw_count):
+                    adjusted_shares[draw_id, :] = self._apply_multi_option_error(
+                        base_shares[draw_id, :].tolist(), float(total_error[draw_id])
+                    )
+            winner_indices = np.argmax(adjusted_shares, axis=1)
+            turnout_base = self._turnout_base(race_id, fundamentals)
+            turnouts = np.rint(turnout_base * np.maximum(0.6, 1.0 + national_error)).astype(int)
+            for draw_id in range(self.draw_count):
+                for option_index, option in enumerate(race_options):
+                    rows.append(
+                        {
+                            "draw_id": draw_id,
+                            "correlated_error_draw_id": draw_id,
+                            "race_id": race_id,
+                            "option_id": option["option_id"],
+                            "party": option["party"],
+                            "turnout": int(turnouts[draw_id]),
+                            "vote_share": float(adjusted_shares[draw_id, option_index]),
+                            "winner": option_index == int(winner_indices[draw_id]),
+                        }
+                    )
+        return pl.DataFrame(rows) if rows else pl.DataFrame()
 
     def _race_sigma(self, race: dict[str, object], estimate: dict[str, object]) -> float:
         tier_floor = self.tier_sigma.get(str(race["tier"]), 0.08)

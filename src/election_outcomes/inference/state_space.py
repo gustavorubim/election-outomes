@@ -50,6 +50,7 @@ def build_state_space_data(
     cycle: int | None = None,
     prior_logit_by_key: dict[tuple[str, str], float] | None = None,
     poll_half_life_days: float = 21.0,
+    process_drift_sd_per_sqrt_day: float = 0.0,
     pollster_house_effects: dict[tuple[str, str | None], float] | None = None,
 ) -> StateSpaceData:
     """Build poll-level tensors consumed by the hierarchical NumPyro backend."""
@@ -128,12 +129,14 @@ def build_state_space_data(
         observation_weight = max(quality_weight * recency_weight, 1e-3)
         effective_sample_size = sample_size * observation_weight
         share_sd = math.sqrt(max(share * (1.0 - share) / effective_sample_size, 1e-6))
+        obs_sd_logit = share_sd / max(share * (1.0 - share), 1e-6)
+        process_sd_logit = max(float(process_drift_sd_per_sqrt_day), 0.0) * math.sqrt(age_days)
         poll_t.append(int((poll_date - min_date).days))
         poll_s.append(key_index[key])
         poll_j.append(pollster_index[pollster])
         poll_o.append(0)
         y.append(logit(share))
-        kappa.append(max(share_sd / max(share * (1.0 - share), 1e-6), 0.02))
+        kappa.append(max(math.sqrt(obs_sd_logit**2 + process_sd_logit**2), 0.02))
         observation_weights.append(observation_weight)
         house_effect_values.append(float(house_effect))
 
@@ -186,6 +189,8 @@ def build_state_space_data(
             "cycle": cycle,
             "poll_count": len(y),
             "poll_half_life_days": float(poll_half_life_days),
+            "process_drift_sd_per_sqrt_day": float(process_drift_sd_per_sqrt_day),
+            "temporal_process_variance": "poll_age_logit_variance",
             "observation_weight_min": float(min(observation_weights, default=0.0)),
             "observation_weight_max": float(max(observation_weights, default=0.0)),
             "observation_weight_mean": float(np.mean(observation_weights))

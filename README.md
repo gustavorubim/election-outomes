@@ -81,10 +81,13 @@ deterministic analytic bridge remains available for fast smoke runs by selecting
 explicitly:
 
 NUTS polling observations use the empirical-Bayes pollster house-effect adjustment, a
-Bayesian-specific 7-day half-life, and population/methodology quality weights before
-fitting the election-day latent state. Bayesian component probabilities are normalized
-within each race before ensemble calibration so binary race probabilities remain
-coherent.
+Bayesian-specific 7-day half-life, population/methodology quality weights, and
+poll-age process variance before fitting the as-of latent state. Exported Bayesian
+draws are inflated from `as_of` to election day with
+`bayesian.state_space.forecast_drift_sd_per_sqrt_day`, then constrained within each
+race so binary shares are anti-correlated and sum to one. The simulator uses those
+draws as race-level centers and still applies the configured national, region, office,
+and heavy-tailed local forecast-error layers.
 
 ```bash
 uv run election-outcomes forecast run \
@@ -165,8 +168,8 @@ default switch unless Bayes dependencies are base dependencies, docs/config decl
 Bayesian default, Phase 8 and hard reward gates pass, live-source scope is claimed, and
 rolling-origin Bayes evidence beats the legacy Kalman scorecard without degrading
 interval coverage. The calibrated publication layer uses a bounded Platt/logit
-transform with `ensemble_learning.calibration_max_slope: 2.0`; this keeps recalibration
-from manufacturing overconfident probabilities on small historical panels.
+transform with `ensemble_learning.calibration_max_slope: 1.0`; this keeps recalibration
+from sharpening probabilities on small historical panels.
 The live-source scope check inspects the run's curated source manifest and tables; it
 only claims live 2026 coverage when successful non-file sources contribute
 model-bearing rows for every office listed in the scenario's
@@ -237,8 +240,16 @@ the polling posterior. The analytic bridge and NumPyro/NUTS backend both initial
 their race-option logits from this artifact. Candidate offices with no eligible polls
 can still receive prior-only posterior draws from that fundamentals prior so sparse
 House/Senate races leave an auditable uncertainty artifact instead of disappearing from
-the Bayesian state. The legacy Kalman path remains available with
+the Bayesian state; these prior-only posterior summaries can also enter the polling
+component for sparse forecast rows. Posterior draws are election-day latent centers;
+`forecast_draws` adds the full simulation uncertainty stack before probabilities are
+published. The legacy Kalman path remains available with
 `--inference-engine kalman`.
+
+If learned component admission trusts a component that has no current rows for the
+requested scenario, the forecast records `component_admission_runtime_fallback` in the
+model config and uses the first available component in polling/fundamentals/markets/
+public-signals order instead of publishing an all-null forecast.
 
 Bayesian runs now also write office-methodology artifacts when relevant. When the
 upstream posterior is fitted by `--bayesian-backend nuts`, these artifacts are
@@ -684,11 +695,13 @@ Important forecast artifacts:
 - `race_forecasts.parquet`: per-option probabilities, vote-share intervals, drivers,
   raw and calibrated per-option probabilities, vote-share intervals, drivers, data-quality
   flags, and lineage hashes.
-- `forecast_draws.parquet`: race-level posterior-style simulation draws.
+- `forecast_draws.parquet`: race-level simulation draws; Bayesian runs seed the draw
+  centers from `posterior_draws.parquet` and still add systematic and heavy-tailed
+  forecast errors.
 - `recalibration_map.parquet`: persisted Platt/logit recalibration map copied from the
   latest trusted backtest when applied to published probabilities.
-- `posterior_draws.parquet`: Bayesian polling latent-share draws unless the run forces
-  `--inference-engine kalman`.
+- `posterior_draws.parquet`: race-constrained Bayesian election-day latent-share draws
+  unless the run forces `--inference-engine kalman`.
 - `state_space_trajectory.parquet`: Bayesian trajectory summaries by
   race, option, and day, with the same lineage hashes as forecast rows.
 - `pollster_house_effects.parquet`: empirical-Bayes pollster house-effect estimates

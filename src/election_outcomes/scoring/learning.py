@@ -140,7 +140,7 @@ def fit_platt_calibration(
     ridge: float = 1e-3,
     max_iterations: int = 50,
     min_slope: float = 0.25,
-    max_slope: float = 2.0,
+    max_slope: float = 1.0,
     max_abs_intercept: float = 2.0,
 ) -> dict[str, Any]:
     """Fit a small-ridge Platt/logit calibration transform."""

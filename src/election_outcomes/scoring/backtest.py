@@ -444,7 +444,7 @@ class BacktestRunner:
                 "row_count": frame.height,
                 "ridge": float(settings.get("calibration_ridge", 1e-3)),
                 "min_slope": float(settings.get("calibration_min_slope", 0.25)),
-                "max_slope": float(settings.get("calibration_max_slope", 2.0)),
+                "max_slope": float(settings.get("calibration_max_slope", 1.0)),
                 "max_abs_intercept": float(settings.get("calibration_max_abs_intercept", 2.0)),
             }
             return {
@@ -475,7 +475,7 @@ class BacktestRunner:
             min_rows=minimum_rows,
             ridge=float(settings.get("calibration_ridge", 1e-3)),
             min_slope=float(settings.get("calibration_min_slope", 0.25)),
-            max_slope=float(settings.get("calibration_max_slope", 2.0)),
+            max_slope=float(settings.get("calibration_max_slope", 1.0)),
             max_abs_intercept=float(settings.get("calibration_max_abs_intercept", 2.0)),
         )
         calibration["input_probability"] = "learned_ensemble_probability"

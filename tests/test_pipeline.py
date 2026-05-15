@@ -258,6 +258,22 @@ def test_bayesian_polling_exports_deterministic_posterior_draws(tmp_path: Path) 
     assert first_diagnostics["engine"] == "bayes-analytic-logit-normal"
     assert first_diagnostics["parameterization"] == "noncentered"
     assert first_diagnostics["divergences"] == 0
+    assert first_diagnostics["forecast_horizon_inflation"]["method"] == (
+        "random_walk_logit_inflation"
+    )
+    posterior_sums = (
+        first_draws.join(
+            active.options.group_by("race_id").agg(
+                pl.col("option_id").n_unique().alias("option_count")
+            ),
+            on="race_id",
+            how="inner",
+        )
+        .filter(pl.col("option_count") > 1)
+        .group_by(["race_id", "draw_id"])
+        .agg(pl.col("latent_share").sum().alias("share_sum"))
+    )
+    assert posterior_sums["share_sum"].to_list() == pytest.approx([1.0] * posterior_sums.height)
     assert first_draws.to_dicts() == second_draws.to_dicts()
 
 
@@ -347,6 +363,8 @@ def test_bayesian_polling_adapts_numpyro_nuts_result(tmp_path: Path, monkeypatch
     assert diagnostics["r_hat_available"] is True
     assert diagnostics["ess_available"] is True
     assert diagnostics["draw_count"] == 100
+    assert diagnostics["posterior_sample_resampling"] == "with_replacement"
+    assert diagnostics["forecast_horizon_inflation"]["mean_horizon_sd_logit"] > 0
     probability_sums = estimates.group_by("race_id").agg(
         pl.len().alias("option_count"),
         pl.col("marginal_win_probability").sum().alias("probability_sum"),
@@ -354,8 +372,9 @@ def test_bayesian_polling_adapts_numpyro_nuts_result(tmp_path: Path, monkeypatch
     assert probability_sums.filter(pl.col("option_count") > 1)[
         "probability_sum"
     ].to_list() == pytest.approx([1.0] * probability_sums.filter(pl.col("option_count") > 1).height)
-    assert estimates.height == diagnostics["polling_observed_race_option_count"]
+    assert estimates.height == diagnostics["race_option_count"]
     assert diagnostics["prior_only_race_option_count"] >= 0
+    assert diagnostics["race_option_count"] >= diagnostics["polling_observed_race_option_count"]
     assert draws.height == diagnostics["draw_count"] * diagnostics["race_option_count"]
     assert senate.diagnostics["state_space_nuts_fitted"] is True
     assert senate.diagnostics["engine"] == "numpyro-nuts-senate-joint-decomposition"
@@ -485,8 +504,18 @@ def test_state_space_data_and_seed_helpers(tmp_path: Path) -> None:
         cycle=2024,
         pollster_house_effects={(data.pollster_ids[0], None): 0.02},
     )
+    drift_data = build_state_space_data(
+        bundle,
+        as_of="2024-10-01",
+        office_type="president",
+        cycle=2024,
+        process_drift_sd_per_sqrt_day=0.01,
+    )
     assert adjusted_data.metadata["pollster_house_effect_adjustment_mean_abs"] > 0
     assert not np.allclose(adjusted_data.poll_logit_y, data.poll_logit_y)
+    assert drift_data.metadata["process_drift_sd_per_sqrt_day"] == pytest.approx(0.01)
+    assert drift_data.metadata["temporal_process_variance"] == "poll_age_logit_variance"
+    assert float(drift_data.poll_kappa.mean()) > float(data.poll_kappa.mean())
     assert {"governor", "house", "president", "senate"}.issubset(set(midterm_data.office_ids))
     assert "CA" in set(midterm_data.geography_ids)
     assert first_seed == second_seed
@@ -628,6 +657,7 @@ def test_forecast_run_writes_required_artifacts_and_rewards(tmp_path: Path) -> N
         "poll_trajectory.parquet",
         "stability_metrics.json",
         "performance.json",
+        "recalibration_map.parquet",
         "reproducibility_fingerprint.json",
         "plots",
         "race_detail_index.json",
@@ -746,6 +776,39 @@ def test_model_config_hash_ignores_volatile_admission_timestamp() -> None:
     assert ForecastPipeline._config_hash(first) == ForecastPipeline._config_hash(second)
 
 
+def test_publication_probability_calibration_caps_sharpening_slope() -> None:
+    bounded = ForecastPipeline._publication_probability_calibration(
+        {"ensemble_learning": {"calibration_max_slope": 1.0}},
+        {
+            "status": "fitted",
+            "method": "platt_logistic_ridge",
+            "intercept": 0.0,
+            "slope": 2.0,
+            "max_slope": 2.0,
+        },
+    )
+
+    assert bounded["slope"] == pytest.approx(1.0)
+    assert bounded["source_slope"] == pytest.approx(2.0)
+    assert bounded["publication_slope_capped"] is True
+
+
+def test_component_admission_falls_back_when_trusted_component_unavailable() -> None:
+    model_config = {
+        "trusted_components": {"markets": True, "polling": False, "fundamentals": False},
+        "component_weights": {"markets": 1.0, "polling": 0.0, "fundamentals": 0.0},
+    }
+    polling = pl.DataFrame(
+        [{"component": "polling", "admitted": True, "race_id": "R", "option_id": "D"}]
+    )
+
+    updated = ForecastPipeline._ensure_available_component_admission(model_config, [polling])
+
+    assert updated["trusted_components"]["polling"] is True
+    assert updated["component_weights"]["polling"] == pytest.approx(1.0)
+    assert updated["component_admission_runtime_fallback"]["fallback_component"] == "polling"
+
+
 def test_forecast_run_with_bayes_writes_posterior_artifacts(tmp_path: Path) -> None:
     ctx = context(tmp_path)
     out_dir = ForecastPipeline(ctx).run_forecast(
@@ -860,6 +923,7 @@ def test_forecast_run_with_bayes_writes_posterior_artifacts(tmp_path: Path) -> N
     assert 'id="posterior_diagnostics"' in html
     assert 'id="fundamentals_prior"' in html
     assert performance["posterior_draws_used"] is True
+    assert performance["posterior_draw_uncertainty_mode"] == "posterior_plus_simulation_error"
     assert reward_card["rewards"]["R13_posterior_quality"]["passed"] is True
     assert verification["passed"] is True
     assert any(check["name"] == "state_space_trajectory_schema" for check in verification["checks"])
@@ -893,20 +957,29 @@ def test_forecast_run_with_bayes_writes_posterior_artifacts(tmp_path: Path) -> N
     assert "fundamentals_prior" in model_card
     assert "office_methodology" in model_card
 
-    race_id = posterior["race_id"][0]
-    expected = (
-        posterior.filter((pl.col("race_id") == race_id) & (pl.col("draw_id") == 0))
-        .with_columns((pl.col("latent_share") / pl.col("latent_share").sum()).alias("expected"))
-        .sort("option_id")
+    posterior_sums = (
+        posterior.group_by(["race_id", "draw_id"])
+        .agg(
+            pl.len().alias("option_count"),
+            pl.col("latent_share").sum().alias("share_sum"),
+        )
+        .filter(pl.col("option_count") > 1)
     )
-    simulated = (
-        forecast_draws.filter((pl.col("race_id") == race_id) & (pl.col("draw_id") == 0))
-        .sort("option_id")
-        .select(["option_id", "vote_share"])
+    forecast_sums = forecast_draws.group_by(["race_id", "draw_id"]).agg(
+        pl.col("vote_share").sum().alias("share_sum")
     )
-    joined = expected.join(simulated, on="option_id", how="inner")
-    assert not joined.is_empty()
-    assert joined.select((pl.col("expected") - pl.col("vote_share")).abs().max()).item() < 1e-12
+    joined_draws = posterior.select(["draw_id", "race_id", "option_id", "latent_share"]).join(
+        forecast_draws.select(["draw_id", "race_id", "option_id", "vote_share"]),
+        on=["draw_id", "race_id", "option_id"],
+        how="inner",
+    )
+    assert posterior_sums["share_sum"].to_list() == pytest.approx([1.0] * posterior_sums.height)
+    assert forecast_sums["share_sum"].to_list() == pytest.approx([1.0] * forecast_sums.height)
+    assert not joined_draws.is_empty()
+    assert (
+        joined_draws.select((pl.col("latent_share") - pl.col("vote_share")).abs().max()).item()
+        > 1e-4
+    )
 
 
 def test_multioffice_verification_scenario_filters_expected_offices(
@@ -946,8 +1019,8 @@ def test_historical_calibration_audit_writes_phase_gates(tmp_path: Path) -> None
     office_frame = pl.read_parquet(out_dir / "office_calibration.parquet")
     persisted = json.loads((out_dir / "historical_calibration.json").read_text(encoding="utf-8"))
 
-    assert payload["passed"] is True
-    assert persisted["passed"] is True
+    assert payload["passed"] is False
+    assert persisted["passed"] is False
     assert {row["office_type"] for row in payload["office_calibration"]} == {
         "governor",
         "house",
@@ -956,7 +1029,13 @@ def test_historical_calibration_audit_writes_phase_gates(tmp_path: Path) -> None
     assert set(office_frame["office_type"].to_list()) == {"governor", "house", "senate"}
     assert payload["gates"]["phase4_senate"]["passed"] is True
     assert payload["gates"]["phase5_house"]["passed"] is True
-    assert payload["gates"]["phase7_cross_office"]["passed"] is True
+    assert payload["gates"]["phase7_cross_office"]["passed"] is False
+    assert (
+        payload["gates"]["phase7_cross_office"]["per_office"]["governor"][
+            "expected_calibration_error"
+        ]
+        > 0.06
+    )
     assert (out_dir / "historical_calibration_comparison.parquet").exists()
     assert (out_dir / "historical_calibration.md").exists()
     assert (

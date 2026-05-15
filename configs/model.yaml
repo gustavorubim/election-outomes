@@ -24,7 +24,7 @@ ensemble_learning:
   l2_prior_strength: 0.02
   calibration_ridge: 0.001
   calibration_min_slope: 0.25
-  calibration_max_slope: 2.0
+  calibration_max_slope: 1.0
   calibration_max_abs_intercept: 2.0
 baseline:
   previous_share_sigma: 0.08
@@ -56,6 +56,7 @@ bayesian:
     parameterization: noncentered
     initial_state_logit_sd: 0.5
     election_day_extra_sd: 0.025
+    forecast_drift_sd_per_sqrt_day: 0.006
     poll_half_life_days: 7
     geography_effect_sd: 0.06
     race_effect_sd: 0.08

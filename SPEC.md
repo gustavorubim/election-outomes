@@ -51,8 +51,8 @@ Every `forecast run` must create `artifacts/runs/<run_id>/` with:
   Numba availability, thread count, and simulation count.
 - `recalibration_map.parquet`: persisted Platt/logit probability calibration map when
   a latest rolling-origin backtest map is available and applied to the run.
-- `posterior_draws.parquet`: Bayesian polling latent-share posterior draws unless
-  `forecast run --inference-engine kalman` is used.
+- `posterior_draws.parquet`: race-constrained Bayesian election-day latent-share
+  posterior draws unless `forecast run --inference-engine kalman` is used.
 - `state_space_trajectory.parquet`: Bayesian trajectory summaries by race,
   option, and date with model/source lineage hashes.
 - `pollster_house_effects.parquet`: Bayesian empirical-Bayes pollster house-effect
@@ -261,7 +261,8 @@ Component models:
   logit-normal posterior draws, state-space trajectory summaries, posterior diagnostics,
   and pollster house-effect artifacts behind the same component schema. Candidate
   offices without eligible polls may receive fundamentals-prior-only posterior draws so
-  sparse House/Senate races still produce auditable uncertainty artifacts. The Bayesian
+  sparse House/Senate races still produce auditable uncertainty artifacts and sparse
+  forecast rows. The Bayesian
   backend defaults to compact hierarchical NumPyro/NUTS with two vectorized chains, 500
   warmup iterations, 2,000 sampling iterations per chain, and a `0.99` target
   acceptance probability; `--bayesian-backend analytic` selects the deterministic bridge
@@ -269,9 +270,11 @@ Component models:
   NUTS path is available after plain `uv sync`. The NUTS backend pools options through
   non-centered office, geography, and race-level effects plus pollster effects. Poll
   observations use empirical-Bayes pollster house-effect adjustment, a Bayesian-specific
-  7-day recency half-life, population screen, and methodology so stale or lower-quality
-  polls do not dominate the static election-day latent state. Bayesian component
-  probabilities are normalized within each race before ensemble calibration.
+  7-day recency half-life, population screen, methodology weights, and poll-age process
+  variance so stale or lower-quality polls do not dominate the as-of latent state. The
+  exported posterior draw artifact inflates that state from `as_of` to election day with
+  `bayesian.state_space.forecast_drift_sd_per_sqrt_day` and constrains all options
+  within each race to sum to one before ensemble calibration.
 - Fundamentals model: historical vote share, partisan lean, incumbency, finance, economy,
   demographics, turnout history, and election type through a standardized ridge fit when
   enough prior-cycle rows exist, otherwise explicit defaults. Bayesian runs convert the
@@ -283,12 +286,17 @@ Component models:
   component-disagreement tracking, rolling-origin simplex weight learning when the
   backtest is trustworthy, calibrated marginal winner probabilities, and a persisted
   recalibration map when a latest rolling-origin calibration artifact is available.
+  If a learned trusted component has no current estimates for the forecast scope, the
+  run records a runtime admission fallback and uses the first available component in
+  polling/fundamentals/markets/public-signals order rather than publishing an all-null
+  forecast.
 - Simulation: structured-factor election-error draws. When a residual covariance artifact
   is available, that covariance replaces the configured national/region/office layers;
   otherwise the engine falls back to national, region, and office factors plus
-  heavy-tailed local error. Bayesian posterior draws replace the configured race-level
-  simulation source for Bayesian races. Race-level winners, vote shares, and turnout are
-  always emitted; thresholded control outcomes are emitted only for races with a
+  heavy-tailed local error. Bayesian posterior draws seed the race-level simulation
+  center for Bayesian races, but the simulator still applies national, region, office,
+  and heavy-tailed local forecast-error layers. Race-level winners, vote shares, and
+  turnout are always emitted; thresholded control outcomes are emitted only for races with a
   configured `control_body`, so non-control tracker rows can participate in posterior
   and cross-office artifacts without changing seat-count math.
 - Daily update: `forecast update --from-anchor <run_id> --as-of <date>` appends
@@ -328,8 +336,8 @@ Planned statistical upgrade path:
 - Replace the current rolling-origin simplex/Platt calibration layer with a richer
   hierarchical calibration model once the historical panel is deep enough.
 - Until that replacement exists, keep Platt/logit recalibration slope-bounded at
-  `ensemble_learning.calibration_max_slope: 2.0` for publication; larger slopes are
-  treated as research-only because they can overfit sparse historical panels.
+  `ensemble_learning.calibration_max_slope: 1.0` for publication so the calibration
+  layer cannot sharpen probabilities from sparse historical panels.
 - Extend live source adapters while preserving raw-source hash and curated-table
   contracts.
 - Extend Numba kernels to multi-option/ranked-choice simulation and score aggregation when

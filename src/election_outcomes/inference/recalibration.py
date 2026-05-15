@@ -135,7 +135,7 @@ def fit_recalibration(
             min_rows=int(dict(config or {}).get("minimum_rows_for_trust", 30)),
             ridge=float(settings.get("calibration_ridge", 1e-3)),
             min_slope=float(settings.get("calibration_min_slope", 0.25)),
-            max_slope=float(settings.get("calibration_max_slope", 2.0)),
+            max_slope=float(settings.get("calibration_max_slope", 1.0)),
             max_abs_intercept=float(settings.get("calibration_max_abs_intercept", 2.0)),
         )
         calibration["input_probability"] = probability_col
@@ -163,7 +163,7 @@ def recalibration_map_from_calibration(
         sample_size=int(calibration.get("row_count", 0)),
         ridge=float(calibration.get("ridge", 1e-3)),
         min_slope=float(calibration.get("min_slope", 0.25)),
-        max_slope=float(calibration.get("max_slope", 2.0)),
+        max_slope=float(calibration.get("max_slope", 1.0)),
         max_abs_intercept=float(calibration.get("max_abs_intercept", 2.0)),
         uncalibrated_log_loss=_optional_float(calibration.get("uncalibrated_log_loss")),
         calibrated_log_loss=_optional_float(calibration.get("calibrated_log_loss")),
@@ -186,7 +186,7 @@ def _identity_calibration(
         "row_count": row_count,
         "ridge": float(settings.get("calibration_ridge", 1e-3)),
         "min_slope": float(settings.get("calibration_min_slope", 0.25)),
-        "max_slope": float(settings.get("calibration_max_slope", 2.0)),
+        "max_slope": float(settings.get("calibration_max_slope", 1.0)),
         "max_abs_intercept": float(settings.get("calibration_max_abs_intercept", 2.0)),
     }
 

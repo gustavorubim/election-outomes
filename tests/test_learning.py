@@ -114,8 +114,8 @@ def test_platt_calibration_bounds_and_identity_paths() -> None:
         {"intercept": fitted["intercept"], "slope": fitted["slope"]},
     )
 
-    assert default_fitted["max_slope"] == 2.0
-    assert default_fitted["slope"] <= 2.0
+    assert default_fitted["max_slope"] == 1.0
+    assert default_fitted["slope"] <= 1.0
     assert fitted["status"] == "fitted"
     assert 0.25 <= fitted["slope"] <= 2.0
     assert abs(fitted["intercept"]) <= 0.5
