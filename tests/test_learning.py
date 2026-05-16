@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from election_outcomes.scoring.learning import (
+from civic_signal.scoring.learning import (
     apply_platt_calibration,
     fit_platt_calibration,
     fit_simplex_weights,

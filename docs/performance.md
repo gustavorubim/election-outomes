@@ -26,7 +26,7 @@ performance:
 ## Commands
 
 ```bash
-uv run election-outcomes benchmark run --as-of 2026-05-08 --run-id perf
+uv run civic-signal benchmark run --as-of 2026-05-08 --run-id perf
 ```
 
 The benchmark writes:

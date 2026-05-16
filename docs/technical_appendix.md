@@ -311,6 +311,185 @@ $$
 
 with joint posterior inference over trajectories, house effects, and variance terms.
 
+### 4.6 Bayesian Polling Posterior
+
+The Bayesian path is the production polling component (`--inference-engine bayes`,
+`--bayesian-backend nuts` by default). It replaces the §4.3–4.4 Kalman trajectory
+with a hierarchical logit-normal posterior over the election-day latent share per
+race-option, fitted with NumPyro/NUTS. The deterministic analytic backend
+(`--bayesian-backend analytic`) implements the same contract through closed-form
+conjugate updates and is used for fast smoke runs.
+
+#### 4.6.1 Notation
+
+Indices follow §4.1: `i` indexes poll observations, `j(i)` the pollster, `o` the
+option, and `r` the race. Additional indices:
+
+- `g(r)`: geography group of race `r` (state or national).
+- `f(r)`: office of race `r` (`president`, `senate`, `house`, `governor`,
+  `ballot_measure`).
+
+Latent quantities, all on the logit scale at the as-of date:
+
+- `θ_{r,o}`: state of option `o` in race `r`.
+- `μ_o^{prior}`: fundamentals-prior mean for option `o` (or `logit(0.5)` if no
+  fundamentals row is admitted; see §5).
+- `α_{f(r)}`, `γ_{g(r)}`, `ρ_r`: office, geography, and race random effects.
+- `ζ_{r,o}`: option-level deviation.
+- `η_{j}`: pollster effect, soft sum-to-zero across pollsters.
+
+#### 4.6.2 Observation Likelihood
+
+For poll `i` of race `r(i)`, option `o(i)`, pollster `j(i)`, with field-end age
+`a_i = (\text{as-of} - t_i)_+` days and effective sample size `n_i^{eff}` from §4.2:
+
+$$
+\mathrm{logit}(y_i^\star)
+\sim
+\mathcal{N}\!\Big(
+  \theta_{r(i),o(i)} + \eta_{j(i)},
+  \ \kappa_i^2
+\Big)
+$$
+
+with house-effect-adjusted share `y_i^\star = y_i - \hat h_{j(i),o(i)}` from §4.5
+and the observation kappa widened by poll age to substitute for explicit state
+evolution:
+
+$$
+\kappa_i^2
+=
+\frac{R_i}{\max\{y_i^\star(1-y_i^\star),\ 10^{-6}\}^{2}}
++ \sigma_{\text{drift}}^{2}\, a_i
+$$
+
+where `R_i` is the §4.2 share-space observation variance, the divisor converts it
+to logit space via the delta method, and `\sigma_{\text{drift}}` is the per-day
+process-drift standard deviation
+(`bayesian.state_space.forecast_drift_sd_per_sqrt_day`, default `0.006`). The
+floor `0.02` from `bayesian.observation.nonsampling_logit_floor` is enforced on
+`\kappa_i`. Poll quality and recency are applied through `n_i^{eff}` and a
+Bayesian-specific seven-day half-life weight in `\omega_i`, so stale or
+lower-quality polls neither dominate the posterior nor contribute zero
+information.
+
+#### 4.6.3 Hierarchical State
+
+Each race-option latent uses non-centered parameterization:
+
+$$
+\theta_{r,o}
+=
+\mu_o^{prior}
++ \alpha_{f(r)}
++ \gamma_{g(r)}
++ \rho_r
++ \sigma_{\text{state}}\, z_{r,o},
+\qquad
+z_{r,o} \sim \mathcal{N}(0, 1)
+$$
+
+with random-effect blocks `α`, `γ`, `ρ` drawn as `\sigma_\cdot \cdot z_\cdot`
+under HalfNormal scale priors, then centered to sum to zero within each block.
+Pollster effects use the same non-centered pattern with a soft sum-to-zero
+implementation `η_j = τ_h (z_j − \bar z)`. There is no explicit per-day random
+walk: the random-walk component of plan-of-record state-space models is folded
+into `\kappa_i` via the age-dependent `\sigma_{\text{drift}}^2 a_i` term.
+
+Default hyperpriors (overridable via `configs/model.yaml` `bayesian.state_space`
+and `bayesian.observation`):
+
+| Parameter | Prior | Default | Role |
+|---|---|---|---|
+| `\sigma_{\text{state}}` | HalfNormal | `0.5` | Option-level latent scale |
+| `\sigma_{\text{office}}` | HalfNormal | `0.02` | Office random-effect scale |
+| `\sigma_{\text{geography}}` | HalfNormal | `0.06` | Geography random-effect scale |
+| `\sigma_{\text{race}}` | HalfNormal | `0.08` | Race random-effect scale |
+| `\tau_h` | HalfNormal | `0.04` | Pollster effect scale |
+| `\sigma_{\text{drift}}` | fixed | `0.006` | Per-day drift, applied to `\kappa` and to the election-day horizon |
+
+#### 4.6.4 Election-Day Horizon Inflation
+
+Posterior draws are exported as the election-day latent, not the as-of latent.
+Let `D_r` be the days between as-of and the election date of race `r`. For each
+posterior draw of `θ_{r,o}`, the exported draw is:
+
+$$
+\theta_{r,o}^{T}
+=
+\theta_{r,o}
++ \sigma_{\text{drift}}\sqrt{D_r}\, \xi_{r,o},
+\qquad
+\xi_{r,o} \sim \mathcal{N}(0, 1)
+$$
+
+The analytic backend inflates the posterior standard deviation directly; the
+NUTS backend draws `ξ` per draw so the exported shape `(num_draws, num_options)`
+matches the analytic export.
+
+#### 4.6.5 Race Sum-To-One Constraint
+
+Within each posterior draw, the option latent logits are softmaxed across the
+options of a race before publication:
+
+$$
+p_{r,o}^{T,\,\text{published}}
+=
+\frac{\exp(\theta_{r,o}^{T})}
+     {\sum_{o' \in r} \exp(\theta_{r,o'}^{T})}
+$$
+
+`latent_share` is the renormalized share and `latent_logit` is recomputed from
+it as `\log(p / (1-p))` so two-option races have one degree of freedom per draw
+and the DEM/REP shares are perfectly anti-correlated. Single-option entries
+(e.g., diagnostic rows) skip the softmax. This guarantees the
+`posterior_draws.parquet → forecast_draws.parquet` joint distribution preserves
+race-level sum-to-one and uses the right sign of cross-option correlation.
+
+#### 4.6.6 Posterior Quality Gates
+
+`R13_posterior_quality` is satisfied only when:
+
+- `\hat R` ≤ `1.05` across sampled parameters.
+- Bulk ESS ≥ 400 per parameter, with warning between 200 and 400 and failure
+  below 200.
+- Divergences = 0; warning above 0.5% of post-warmup draws.
+- The configured failover policy is recorded even when not exercised.
+
+Default NUTS settings are `num_chains: 2`, `num_warmup: 500`,
+`num_samples: 2000`, `target_accept_prob: 0.99`, `chain_method: vectorized`.
+
+#### 4.6.7 Simulation Engine Integration
+
+When a race has posterior draws, `SimulationEngine` uses the posterior
+`latent_share` as the per-draw center and still applies the §9 forecast-error
+layers on top: tier σ floor, heavy-tailed Student-t local error, and
+national/region/office systematic errors (or the residual-covariance group draw
+when that artifact is available). For two-option races, the second option's
+vote share is derived as `1 - share_0` after the error term so race-level
+sum-to-one is preserved in `forecast_draws.parquet`. For ≥ 3-option races, the
+existing log-share perturbation from §9.3 is reused with the posterior shares
+as the centering point. This is the audit trail behind
+`performance.posterior_draw_uncertainty_mode = posterior_plus_simulation_error`.
+
+#### 4.6.8 Reproducibility
+
+- JAX PRNG seed: `prng_key = jax.random.PRNGKey(seed)` where
+  `seed = sha256(bundle_fingerprint || as_of || draw_count || "bayes").int %
+  2^{32}`.
+- All math runs in `float64`; `numpyro.enable_x64()` is set in the inference
+  module init.
+- `chain_method: vectorized` is the canonical setting for the reproducibility
+  fingerprint contract; `parallel` is opt-in for performance and not
+  byte-deterministic across host topologies.
+- Posterior subsampling uses `numpy.random.Generator.choice(replace=False)`
+  when the NUTS sample count is at least the requested draw count, and
+  `replace=True` otherwise, recorded as `posterior_sample_resampling` in
+  `posterior_diagnostics.json`.
+- Calibration `fit_at` timestamps are excluded from the reproducibility
+  fingerprint so re-fitting the recalibration map without changing inputs does
+  not churn `combined_hash`.
+
 ## 5. Fundamentals Model
 
 ### 5.1 Training Target
@@ -1170,5 +1349,5 @@ uv sync
 chflags -R nohidden .venv
 uv run ruff check
 uv run ruff format --check
-PYTHONPATH=src uv run pytest --cov=src/election_outcomes --cov-fail-under=90
+PYTHONPATH=src uv run pytest --cov=src/civic_signal --cov-fail-under=90
 ```

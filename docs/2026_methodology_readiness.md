@@ -6,7 +6,7 @@ readiness check, not a claim that the full live 2026 production forecast is comp
 ## Verification Command
 
 ```bash
-uv run election-outcomes verify run \
+uv run civic-signal verify run \
   --scenario 2026-multioffice-verification \
   --run-id phase8-verification \
   --as-of 2026-05-08 \
@@ -50,7 +50,7 @@ beat the legacy Kalman score without coverage degradation.
 The default-switch decision is now machine-audited by:
 
 ```bash
-uv run election-outcomes verify readiness \
+uv run civic-signal verify readiness \
   --run-id bayes-default-readiness \
   --forecast-run-id phase8-verification \
   --bayes-backtest-run-id president-state-bayes-backtest \

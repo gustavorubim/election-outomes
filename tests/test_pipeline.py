@@ -10,27 +10,27 @@ import numpy as np
 import polars as pl
 import pytest
 
-from election_outcomes.config import ProjectContext, ScenarioRegistry
-from election_outcomes.features import FeatureBuilder
-from election_outcomes.inference.cross_office import summarize_cross_office
-from election_outcomes.inference.failover import (
+from civic_signal.config import ProjectContext, ScenarioRegistry
+from civic_signal.features import FeatureBuilder
+from civic_signal.inference.cross_office import summarize_cross_office
+from civic_signal.inference.failover import (
     FailoverPolicy,
     execute_with_failover,
     exercise_timeout_failover,
 )
-from election_outcomes.inference.fundamentals_prior import (
+from civic_signal.inference.fundamentals_prior import (
     DiagonalNormalPrior,
     build_fundamentals_prior,
     to_numpyro_prior,
 )
-from election_outcomes.inference.house_hierarchical import summarize_house_hierarchical
-from election_outcomes.inference.recalibration import RecalibrationMap, fit_recalibration
-from election_outcomes.inference.seed import derive_seed, jax_prng_key
-from election_outcomes.inference.senate_joint import summarize_senate_joint
-from election_outcomes.inference.state_space import build_state_space_data
-from election_outcomes.ingest import SyncRunner
-from election_outcomes.ingest.sources import SourceDefinition, SourceRegistry
-from election_outcomes.models import (
+from civic_signal.inference.house_hierarchical import summarize_house_hierarchical
+from civic_signal.inference.recalibration import RecalibrationMap, fit_recalibration
+from civic_signal.inference.seed import derive_seed, jax_prng_key
+from civic_signal.inference.senate_joint import summarize_senate_joint
+from civic_signal.inference.state_space import build_state_space_data
+from civic_signal.ingest import SyncRunner
+from civic_signal.ingest.sources import SourceDefinition, SourceRegistry
+from civic_signal.models import (
     EnsembleModel,
     FundamentalsModel,
     MarketModel,
@@ -38,19 +38,19 @@ from election_outcomes.models import (
     PublicSignalModel,
     SimulationEngine,
 )
-from election_outcomes.models.common import logit
-from election_outcomes.models.polling import resolve_inference_engine
-from election_outcomes.models.polling_bayes import BayesianPollingModel
-from election_outcomes.normalize import CuratedDataBuilder
-from election_outcomes.normalize.builder import CuratedDataBuilder as _CuratedDataBuilderClass
-from election_outcomes.performance import simulate_binary_draw_arrays
-from election_outcomes.pipeline import ForecastPipeline
-from election_outcomes.reports.plots import PlotGenerator
-from election_outcomes.scoring import BacktestRunner, CycleEvaluationReport, score_predictions
-from election_outcomes.scoring.results import ResultComparator
-from election_outcomes.scoring.rewards import RewardEvaluator
-from election_outcomes.storage.io import read_json
-from election_outcomes.verification import Phase8VerificationRunner
+from civic_signal.models.common import logit
+from civic_signal.models.polling import resolve_inference_engine
+from civic_signal.models.polling_bayes import BayesianPollingModel
+from civic_signal.normalize import CuratedDataBuilder
+from civic_signal.normalize.builder import CuratedDataBuilder as _CuratedDataBuilderClass
+from civic_signal.performance import simulate_binary_draw_arrays
+from civic_signal.pipeline import ForecastPipeline
+from civic_signal.reports.plots import PlotGenerator
+from civic_signal.scoring import BacktestRunner, CycleEvaluationReport, score_predictions
+from civic_signal.scoring.results import ResultComparator
+from civic_signal.scoring.rewards import RewardEvaluator
+from civic_signal.storage.io import read_json
+from civic_signal.verification import Phase8VerificationRunner
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,7 +87,7 @@ def test_sync_is_incremental_and_records_manifest(tmp_path: Path) -> None:
 def test_source_overlay_and_failed_sync_preserve_previous_state(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from election_outcomes.ingest import sync as sync_module
+    from civic_signal.ingest import sync as sync_module
 
     live_ctx = ProjectContext.create(
         root=ROOT,
@@ -133,7 +133,7 @@ def test_source_overlay_and_failed_sync_preserve_previous_state(
 def test_http_sync_reuses_cached_snapshot_when_same_source_refresh_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from election_outcomes.ingest import sync as sync_module
+    from civic_signal.ingest import sync as sync_module
 
     source_path = tmp_path / "remote.csv"
     source_path.write_text("poll_id,race_id,option_id,pct\n1,R,O,50\n", encoding="utf-8")
@@ -278,8 +278,8 @@ def test_bayesian_polling_exports_deterministic_posterior_draws(tmp_path: Path) 
 
 
 def test_bayesian_polling_adapts_numpyro_nuts_result(tmp_path: Path, monkeypatch) -> None:
-    from election_outcomes.inference import nuts as nuts_module
-    from election_outcomes.inference.nuts import InferenceResult
+    from civic_signal.inference import nuts as nuts_module
+    from civic_signal.inference.nuts import InferenceResult
 
     ctx, _sync, bundle = build_bundle(tmp_path)
     active = ForecastPipeline._active_bundle(bundle, "2026-05-08")
@@ -2487,7 +2487,7 @@ def test_538_parser_args_are_required(tmp_path: Path) -> None:
 
 
 def test_http_sync_retries_then_fails_on_unreachable_url(tmp_path: Path, monkeypatch) -> None:
-    from election_outcomes.ingest import sync as sync_module
+    from civic_signal.ingest import sync as sync_module
 
     ctx = ProjectContext.create(
         root=ROOT,

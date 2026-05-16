@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from election_outcomes.reports.diagnostics import DiagnosticsReport
+from civic_signal.reports.diagnostics import DiagnosticsReport
 
 
 def _race_catalog(office_type: str = "senate") -> pl.DataFrame:

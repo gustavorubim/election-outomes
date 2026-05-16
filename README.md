@@ -1,8 +1,14 @@
-# Election Outcomes
+# Civic Signal
 
-CLI-first U.S. election forecasting engine. The package syncs public or fixture-backed
-sources, builds curated race tables, runs polling/fundamentals/market/public-signal
-components, simulates correlated outcomes, and writes auditable diagnostics.
+<p align="center">
+  <img src="docs/assets/civic-signal-bayesian-performance-logo.png" alt="Civic Signal Bayesian statistical forecasting logo" width="420">
+</p>
+
+Civic Signal is a CLI-first U.S. election forecasting engine built as an engineered,
+auditable alternative to narrow POTUS-only economic baselines. The package syncs public
+or fixture-backed sources, builds curated race tables, runs
+polling/fundamentals/market/public-signal components, simulates correlated outcomes,
+and writes reproducible diagnostics.
 
 The current default run is deterministic and fixture-backed so the full artifact,
 plotting, reward, and benchmark contract can be tested before broader live adapters are
@@ -16,8 +22,6 @@ Core project documents:
 - [`docs/technical_appendix.md`](docs/technical_appendix.md): model details.
 - [`docs/performance.md`](docs/performance.md): Numba and performance contract.
 - [`docs/api_requirements.md`](docs/api_requirements.md): live-ingestion API notes.
-- [`docs/plan_completion_audit.md`](docs/plan_completion_audit.md): current evidence
-  against the plan's definition of done and remaining blockers.
 
 ## Package Initialization And Installation
 
@@ -42,7 +46,7 @@ Validate the repo:
 ```bash
 uv run ruff check
 uv run ruff format --check
-PYTHONPATH=src uv run pytest --cov=src/election_outcomes --cov-fail-under=90
+PYTHONPATH=src uv run pytest --cov=src/civic_signal --cov-fail-under=90
 ```
 
 ## Core Workflows
@@ -55,7 +59,7 @@ Run a complete forecast with diagnostics, plots, reward card, and reproducibilit
 fingerprint:
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --as-of 2026-05-08 \
   --run-id full-forecast
 ```
@@ -68,7 +72,7 @@ with 90% interval coverage `0.9662` versus legacy `0.9610`. To force the legacy
 Kalman/state-space path, run:
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --as-of 2026-05-08 \
   --run-id kalman-polling-smoke \
   --inference-engine kalman
@@ -90,7 +94,7 @@ draws as race-level centers and still applies the configured national, region, o
 and heavy-tailed local forecast-error layers.
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --as-of 2026-05-08 \
   --run-id analytic-polling-smoke \
   --inference-engine bayes \
@@ -110,7 +114,7 @@ open artifacts/runs/full-forecast/diagnostics.html
 Verify a completed run's artifacts, plots, posterior schemas, and reward gates:
 
 ```bash
-uv run election-outcomes verify run --run-id full-forecast
+uv run civic-signal verify run --run-id full-forecast
 ```
 
 Run the fixture-backed Phase 8 multi-office verification scenario. This executes a
@@ -120,7 +124,7 @@ visual QA checklist. The President tracker is a non-control fixture row, so it a
 posterior/race/cross-office artifacts but does not contribute Electoral College control:
 
 ```bash
-uv run election-outcomes verify run \
+uv run civic-signal verify run \
   --scenario 2026-multioffice-verification \
   --run-id phase8-verification \
   --as-of 2026-05-08 \
@@ -132,7 +136,7 @@ To make the compact hierarchical NumPyro/NUTS backend explicit through the same 
 harness, add `--bayesian-backend nuts`:
 
 ```bash
-uv run election-outcomes verify run \
+uv run civic-signal verify run \
   --scenario 2026-multioffice-verification \
   --run-id phase8-nuts-verification \
   --as-of 2026-05-08 \
@@ -144,7 +148,7 @@ uv run election-outcomes verify run \
 Run a cached-posterior daily update from a Bayesian anchor run:
 
 ```bash
-uv run election-outcomes forecast update \
+uv run civic-signal forecast update \
   --from-anchor bayes-polling-smoke \
   --as-of 2026-05-09
 ```
@@ -155,7 +159,7 @@ The update appends posterior history, writes run-local update diagnostics, and r
 Audit whether the Bayesian path is eligible to become the production default:
 
 ```bash
-uv run election-outcomes verify readiness \
+uv run civic-signal verify readiness \
   --run-id bayes-default-readiness \
   --forecast-run-id phase8-verification \
   --bayes-backtest-run-id president-state-bayes-backtest \
@@ -280,7 +284,7 @@ Run the rolling-origin scorecard, component admission, learned ensemble calibrat
 residual covariance pass:
 
 ```bash
-uv run election-outcomes backtest run \
+uv run civic-signal backtest run \
   --scenario president_state \
   --run-id president-state-backtest
 ```
@@ -288,7 +292,7 @@ uv run election-outcomes backtest run \
 The same rolling-origin harness can score the Bayesian polling path explicitly:
 
 ```bash
-uv run election-outcomes backtest run \
+uv run civic-signal backtest run \
   --scenario president_state \
   --holdout-cycle 2024 \
   --run-id president-state-bayes-backtest \
@@ -303,7 +307,7 @@ Write scheduled hyperprior refresh candidates without changing the production `l
 artifacts:
 
 ```bash
-uv run election-outcomes backtest refresh-hyperpriors \
+uv run civic-signal backtest refresh-hyperpriors \
   --run-id monthly-hyperpriors \
   --scenarios president_state \
   --inference-engine bayes \
@@ -318,7 +322,7 @@ deliberately non-promoting; production forecasts continue reading
 Run the Phase 0 side-by-side methodology spike:
 
 ```bash
-uv run election-outcomes spike phase-0 \
+uv run civic-signal spike phase-0 \
   --scenario president_state \
   --holdout-cycle 2024 \
   --run-id phase0-potus-2024 \
@@ -328,14 +332,14 @@ uv run election-outcomes spike phase-0 \
 Run the Phase 0b geometry and daily-update acceleration spike:
 
 ```bash
-uv run election-outcomes spike phase-0b --run-id phase0b-acceleration
+uv run civic-signal spike phase-0b --run-id phase0b-acceleration
 ```
 
 Run the compact 2022 Senate/House/Governor historical calibration gate for the
 Phase 4/5/7 office-methodology plan:
 
 ```bash
-uv run election-outcomes verify historical-calibration \
+uv run civic-signal verify historical-calibration \
   --run-id midterm-2022-calibration \
   --bayesian-backend nuts \
   --quiet
@@ -349,7 +353,7 @@ House, and Governor; it does not replace a production-sized historical panel.
 For a production-dimension synthetic congressional panel, switch the source registry:
 
 ```bash
-uv run election-outcomes verify historical-calibration \
+uv run civic-signal verify historical-calibration \
   --run-id historical-panels-2022-nuts \
   --sources-config sources_historical_panels.yaml \
   --data-dir data/historical-panels-nuts \
@@ -418,7 +422,7 @@ fallback run.
 Run the same-date historical presidential benchmark across cycles:
 
 ```bash
-PYTHONPATH=src uv run election-outcomes results cycle-eval \
+PYTHONPATH=src uv run civic-signal results cycle-eval \
   --run-id oct5-presidential-cycle-eval \
   --cycles 2008,2012,2016,2020,2024 \
   --as-of-mm-dd 10-05 \
@@ -471,7 +475,7 @@ cross-cycle stress testing are added.
 Run the 2024 presidential scenario at the default pre-election date:
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --scenario president_2024_state \
   --run-id 2024-presidential
 ```
@@ -479,7 +483,7 @@ uv run election-outcomes forecast run \
 Compare against actual 2024 presidential results:
 
 ```bash
-uv run election-outcomes results compare \
+uv run civic-signal results compare \
   --forecast-run-id 2024-presidential \
   --comparison-id 2024-presidential-actuals \
   --cycle 2024 \
@@ -516,7 +520,7 @@ Run rolling-origin same-date evaluation across Senate Class I/II/III rotations f
 2014–2024:
 
 ```bash
-uv run election-outcomes results cycle-eval \
+uv run civic-signal results cycle-eval \
   --cycles 2014,2016,2018,2020,2022,2024 \
   --as-of-mm-dd 11-04 \
   --scenario-template "senate_{cycle}_state" \
@@ -543,7 +547,7 @@ silver benchmark, control forecast, and forecast-vs-actual comparison.
 Same-date evaluation across the 6 most recent House cycles:
 
 ```bash
-uv run election-outcomes results cycle-eval \
+uv run civic-signal results cycle-eval \
   --cycles 2014,2016,2018,2020,2022,2024 \
   --as-of-mm-dd 11-04 \
   --scenario-template "house_{cycle}_district" \
@@ -630,7 +634,7 @@ deliberately empty until the election happens.
 ### Senate 2026
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --as-of 2026-11-02 \
   --run-id senate-2026-midterm \
   --scenario senate_2026_state \
@@ -642,7 +646,7 @@ uv run election-outcomes forecast run \
 ### House 2026
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --as-of 2026-11-02 \
   --run-id house-2026-midterm \
   --scenario house_2026_district \
@@ -742,10 +746,10 @@ Current trust boundary:
 
 ```mermaid
 flowchart TD
-    repo["election-outomes/"]
+    repo["civic-signal/"]
     config{{"configs/*.yaml"}}
     fixtures[/"fixtures/*.csv"/]
-    src["src/election_outcomes/"]
+    src["src/civic_signal/"]
     tests["tests/"]
     docs["docs/"]
     schemas["schemas/"]
@@ -809,7 +813,7 @@ sequenceDiagram
     participant Reports
     participant Results
 
-    User->>CLI: election-outcomes forecast run
+    User->>CLI: civic-signal forecast run
     CLI->>Pipeline: run_forecast(as_of, run_id)
     Pipeline->>Ingest: SyncRunner.run()
     Ingest-->>Pipeline: source_manifest
@@ -821,7 +825,7 @@ sequenceDiagram
     Models-->>Pipeline: draws, forecasts, control, ecosystem
     Pipeline->>Reports: plots, diagnostics, methodology
     Reports-->>User: artifacts/runs/<run_id>/
-    User->>CLI: election-outcomes results compare
+    User->>CLI: civic-signal results compare
     CLI->>Results: join forecast artifacts to actual results
     Results-->>User: comparisons/<comparison_id>/
 ```
@@ -937,7 +941,7 @@ PY
 ### One-Month-Before 2024 Scenario
 
 ```bash
-PYTHONPATH=src uv run election-outcomes forecast run \
+PYTHONPATH=src uv run civic-signal forecast run \
   --scenario president_2024_state \
   --as-of 2024-10-05 \
   --run-id 2024-presidential-1mo \
@@ -996,7 +1000,7 @@ PY
 ### Reuse Existing Cycle-Eval Artifacts
 
 ```bash
-PYTHONPATH=src uv run election-outcomes results cycle-eval \
+PYTHONPATH=src uv run civic-signal results cycle-eval \
   --run-id oct5-presidential-cycle-eval \
   --cycles 2008,2012,2016,2020,2024 \
   --as-of-mm-dd 10-05 \
@@ -1019,7 +1023,7 @@ prove public HTTP text ingestion and provenance, but they do not influence the B
 polling latent state by themselves. The live registry does not need Google Civic.
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --sources-config sources_live.yaml \
   --data-dir data/live \
   --artifacts-dir artifacts/live \
@@ -1028,7 +1032,7 @@ uv run election-outcomes forecast run \
 ```
 
 ```bash
-uv run election-outcomes results compare \
+uv run civic-signal results compare \
   --sources-config sources_live.yaml \
   --data-dir data/live \
   --artifacts-dir artifacts/live \
@@ -1043,7 +1047,7 @@ To probe whether the public 2026 Senate/Governor/House streams currently satisfy
 Phase 8 live-source scope gate, run the verification scenario against the live registry:
 
 ```bash
-uv run election-outcomes verify run \
+uv run civic-signal verify run \
   --scenario 2026-multioffice-verification \
   --run-id phase8-live-scope-analytic \
   --as-of 2026-05-08 \
@@ -1066,7 +1070,7 @@ verification run indefinitely.
 ### Performance Benchmark
 
 ```bash
-uv run election-outcomes benchmark run \
+uv run civic-signal benchmark run \
   --as-of 2026-05-08 \
   --run-id full-perf
 ```

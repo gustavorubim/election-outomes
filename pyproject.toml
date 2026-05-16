@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "election-outcomes"
+name = "civic-signal"
 version = "0.1.0"
-description = "Research-grade U.S. election forecasting engine with auditable artifacts and verifiable rewards."
+description = "Civic Signal: a research-grade U.S. election forecasting engine with auditable artifacts and verifiable rewards."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -37,10 +37,10 @@ dev = [
 ]
 
 [project.scripts]
-election-outcomes = "election_outcomes.cli:app"
+civic-signal = "civic_signal.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/election_outcomes"]
+packages = ["src/civic_signal"]
 
 [tool.ruff]
 line-length = 100
@@ -50,7 +50,7 @@ target-version = "py311"
 select = ["E", "F", "I", "B", "UP", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/election_outcomes/cli.py" = ["B008"]
+"src/civic_signal/cli.py" = ["B008"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -61,8 +61,8 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["src/election_outcomes"]
-omit = ["src/election_outcomes/cli.py"]
+source = ["src/civic_signal"]
+omit = ["src/civic_signal/cli.py"]
 
 [tool.coverage.report]
 show_missing = true

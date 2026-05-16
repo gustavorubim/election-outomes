@@ -394,7 +394,7 @@ wheels = [
 ]
 
 [[package]]
-name = "election-outcomes"
+name = "civic-signal"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

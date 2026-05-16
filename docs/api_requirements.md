@@ -68,14 +68,14 @@ snapshots so `R5`, `R6`, and `R8` are repeatable.
 ## Current Live Smoke Run
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --sources-config sources_live.yaml \
   --data-dir data/live \
   --artifacts-dir artifacts/live \
   --as-of 2020-10-30 \
   --run-id wi-2020-live-polls
 
-uv run election-outcomes results compare \
+uv run civic-signal results compare \
   --sources-config sources_live.yaml \
   --data-dir data/live \
   --artifacts-dir artifacts/live \

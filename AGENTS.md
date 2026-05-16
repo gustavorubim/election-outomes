@@ -11,7 +11,7 @@ For every task, the agent must ensure the repository still satisfies:
 uv sync
 uv run ruff check
 uv run ruff format --check
-uv run pytest --cov=src/election_outcomes --cov-fail-under=90
+uv run pytest --cov=src/civic_signal --cov-fail-under=90
 ```
 
 Do not lower the coverage gate. If a task cannot run these commands, explain exactly why
@@ -36,5 +36,5 @@ the design contract, update `SPEC.md` too.
 - Preserve `uv`, `ruff`, and the 90% coverage gate as repo standards.
 - Preserve performance expectations: use vectorized Polars/DuckDB for table work, use
   Numba/parallel kernels for repeated numerical loops when practical, and run
-  `uv run election-outcomes benchmark run --as-of 2026-05-08 --run-id perf` after
+  `uv run civic-signal benchmark run --as-of 2026-05-08 --run-id perf` after
   substantial simulation or scoring changes.

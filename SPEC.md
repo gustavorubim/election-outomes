@@ -1,11 +1,11 @@
-# Election Outcomes Specification
+# Civic Signal Specification
 
 ## Summary
 
-Build a U.S.-only, research-grade election forecasting engine that can be run manually
-from time to time. Each run refreshes public data incrementally, snapshots source
-provenance, builds a race catalog, runs a hybrid statistical ensemble, backtests trusted
-components, and emits auditable artifacts with measurable rewards.
+Civic Signal is a U.S.-only, research-grade election forecasting engine that can be run
+manually from time to time. Each run refreshes public data incrementally, snapshots
+source provenance, builds a race catalog, runs a hybrid statistical ensemble, backtests
+trusted components, and emits auditable artifacts with measurable rewards.
 
 The default implementation is fixture-backed so the full modeling, artifact, reward,
 plotting, and validation contract is deterministic. The opt-in live registry
@@ -104,7 +104,7 @@ Forecasts must distinguish:
 Use vector rewards so the system cannot hide weak behavior behind one aggregate score:
 
 - `R0_build`: `uv sync`, `ruff check`, `ruff format --check`, and
-  `pytest --cov=src/election_outcomes --cov-fail-under=90` pass.
+  `pytest --cov=src/civic_signal --cov-fail-under=90` pass.
 - `R1_reproducibility`: fixed inputs and run config produce the same stable artifact
   fingerprint when the same `run_id` is rerun, excluding wall-clock retrieval metadata
   and incremental-sync status fields.
@@ -156,7 +156,7 @@ Primary baselines:
 ## Repository Design
 
 ```text
-election-outomes/
+civic-signal/
   pyproject.toml
   README.md
   AGENTS.md
@@ -172,7 +172,7 @@ election-outomes/
     raw_contracts/
     curated_tables/
     artifact_contracts/
-  src/election_outcomes/
+  src/civic_signal/
     cli.py
     config/
     ingest/
@@ -320,21 +320,18 @@ Component models:
   broader rolling-origin readiness comparison shows Bayes/NUTS beating the legacy
   Kalman scorecard without interval-coverage degradation.
 
-Planned statistical upgrade path:
+Statistical upgrade path:
 
-- Replace the opt-in analytic Bayesian bridge with the full hierarchical NumPyro/NUTS
-  state-space model specified in `plan/04-bayesian-polling-model.md`.
-- Run Phase 0b before any production default switch: non-centered geometry stress tests
-  and a SMC/SVI/reweighting daily-update bakeoff.
-- Expand the Bayesian model from POTUS-style polling to Senate joint, House
-  hierarchical, and cross-office midterm scopes using low-rank or sparse covariance
-  structures where required by the plan. The production NUTS backend emits
-  office-specific decomposition artifacts from the fitted shared state-space draw stream,
-  while the analytic backend remains available as an explicitly labeled bridge. The NUTS
-  backend receives the same fitted fundamentals-prior logit means as the analytic bridge,
-  so Phase 2 prior construction is shared across Bayesian backends.
-- Replace the current rolling-origin simplex/Platt calibration layer with a richer
-  hierarchical calibration model once the historical panel is deep enough.
+- The hierarchical NumPyro/NUTS state-space contract is documented in
+  [`docs/technical_appendix.md`](docs/technical_appendix.md) §4.6 and is the
+  production polling component. The analytic backend remains available as a fast
+  smoke-run bridge through `--bayesian-backend analytic`.
+- The production NUTS backend emits office-specific decomposition artifacts from
+  the fitted shared state-space draw stream. The NUTS backend receives the same
+  fitted fundamentals-prior logit means as the analytic bridge, so prior
+  construction is shared across Bayesian backends.
+- Future work: a richer hierarchical calibration model that can replace the
+  rolling-origin simplex/Platt layer once the historical panel is deep enough.
 - Until that replacement exists, keep Platt/logit recalibration slope-bounded at
   `ensemble_learning.calibration_max_slope: 1.0` for publication so the calibration
   layer cannot sharpen probabilities from sparse historical panels.
@@ -384,7 +381,7 @@ Performance settings live under `performance` in `configs/model.yaml`:
 Benchmark command:
 
 ```bash
-uv run election-outcomes benchmark run --as-of 2026-05-08 --run-id perf
+uv run civic-signal benchmark run --as-of 2026-05-08 --run-id perf
 ```
 
 Benchmark output:
@@ -403,7 +400,7 @@ forecast default is Bayesian/NUTS.
 An existing forecast run can be compared against curated actual results:
 
 ```bash
-uv run election-outcomes results compare \
+uv run civic-signal results compare \
   --forecast-run-id 2024-presidential \
   --comparison-id 2024-presidential-actuals \
   --cycle 2024 \
@@ -432,7 +429,7 @@ and the largest option-level vote-share misses.
 A same-date presidential cycle evaluation should be available as a first-class command:
 
 ```bash
-uv run election-outcomes results cycle-eval \
+uv run civic-signal results cycle-eval \
   --run-id oct5-presidential-cycle-eval \
   --cycles 2008,2012,2016,2020,2024 \
   --as-of-mm-dd 10-05
@@ -486,34 +483,34 @@ The repo is healthy only when all of these pass:
 uv sync
 uv run ruff check
 uv run ruff format --check
-uv run pytest --cov=src/election_outcomes --cov-fail-under=90
+uv run pytest --cov=src/civic_signal --cov-fail-under=90
 ```
 
 A working forecast smoke test is:
 
 ```bash
-uv run election-outcomes forecast run --as-of 2026-05-08 --run-id smoke
-uv run election-outcomes verify run --run-id smoke
-uv run election-outcomes benchmark run --as-of 2026-05-08 --run-id perf
+uv run civic-signal forecast run --as-of 2026-05-08 --run-id smoke
+uv run civic-signal verify run --run-id smoke
+uv run civic-signal benchmark run --as-of 2026-05-08 --run-id perf
 ```
 
 An explicit Bayesian smoke test is:
 
 ```bash
-uv run election-outcomes forecast run \
+uv run civic-signal forecast run \
   --as-of 2026-05-08 \
   --run-id bayes-smoke \
   --inference-engine bayes \
   --bayesian-backend nuts \
   --quiet
-uv run election-outcomes forecast update --from-anchor bayes-smoke --as-of 2026-05-09
-uv run election-outcomes verify run --run-id bayes-smoke
+uv run civic-signal forecast update --from-anchor bayes-smoke --as-of 2026-05-09
+uv run civic-signal verify run --run-id bayes-smoke
 ```
 
 A Phase 0 methodology spike smoke test is:
 
 ```bash
-uv run election-outcomes spike phase-0 \
+uv run civic-signal spike phase-0 \
   --scenario president_state \
   --holdout-cycle 2024 \
   --run-id phase0-smoke \
@@ -523,13 +520,13 @@ uv run election-outcomes spike phase-0 \
 A Phase 0b acceleration spike smoke test is:
 
 ```bash
-uv run election-outcomes spike phase-0b --run-id phase0b-smoke
+uv run civic-signal spike phase-0b --run-id phase0b-smoke
 ```
 
 A fixture-backed Phase 8 multi-office smoke test is:
 
 ```bash
-uv run election-outcomes verify run \
+uv run civic-signal verify run \
   --scenario 2026-multioffice-verification \
   --run-id phase8-smoke \
   --as-of 2026-05-08 \
@@ -540,7 +537,7 @@ uv run election-outcomes verify run \
 The same Phase 8 harness can exercise the compact hierarchical NumPyro/NUTS backend:
 
 ```bash
-uv run election-outcomes verify run \
+uv run civic-signal verify run \
   --scenario 2026-multioffice-verification \
   --run-id phase8-nuts-smoke \
   --as-of 2026-05-08 \
@@ -552,7 +549,7 @@ uv run election-outcomes verify run \
 The Phase 4/5/7 historical calibration gate is:
 
 ```bash
-uv run election-outcomes verify historical-calibration \
+uv run civic-signal verify historical-calibration \
   --run-id midterm-2022-calibration \
   --bayesian-backend nuts \
   --quiet
@@ -565,7 +562,7 @@ claims still require a broader historical panel.
 For production-dimension synthetic Senate and House coverage:
 
 ```bash
-uv run election-outcomes verify historical-calibration \
+uv run civic-signal verify historical-calibration \
   --run-id historical-panels-2022-nuts \
   --sources-config sources_historical_panels.yaml \
   --data-dir data/historical-panels-nuts \
@@ -577,7 +574,7 @@ uv run election-outcomes verify historical-calibration \
 A production-default readiness audit is:
 
 ```bash
-uv run election-outcomes verify readiness \
+uv run civic-signal verify readiness \
   --run-id bayes-default-readiness \
   --forecast-run-id phase8-smoke \
   --bayes-backtest-run-id president-state-bayes-backtest \
